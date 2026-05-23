@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="panel-header">
+    <div class="panel-header-left">
+      <span class="panel-title">EasyScript</span>
+      <div class="main-tabs">
+        <button class="main-tab active" data-tab="editor" id="tabEditor">Editor</button>
+        <button class="main-tab" data-tab="live" id="tabLive">Live</button>
+      </div>
+    </div>
+    <div class="status-badge offline" id="statusBadge">
+      <span class="status-dot"></span>
+      <span id="statusText">Offline</span>
+    </div>
+  </div>
+
+  <!-- ==================== EDITOR TAB ==================== -->
+  <div class="panel-body tab-content" id="editorPanel">
+
+    <!-- Audio Source -->
+    <div class="section">
+      <div class="section-header">
+        <span class="section-label">Audio Source</span>
+      </div>
+      <div class="section-body">
+        <!-- Track select (Premiere mode only) -->
+        <select class="input-select" id="trackSelect">
+          <option value="">Select audio track...</option>
+        </select>
+        <!-- Audio file path (always visible) -->
+        <div class="file-input-row" id="audioFileRow">
+          <input type="text" class="input-text" id="audioPathInput" placeholder="Audio file path..." readonly />
+          <label class="btn btn-icon" id="browseBtn" title="Browse audio file">
+            <input type="file" id="filePicker" accept="audio/*,video/*" style="display:none" />
+            📂
+          </label>
+        </div>
+        <!-- Audio info after loading -->
+        <div class="audio-info hidden" id="audioInfo"></div>
+      </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="section">
+      <div class="section-body action-buttons">
+        <button class="btn btn-primary btn-action" id="autoCutBtn" disabled title="Detect silence & breath segments using ffmpeg">
+          Detect Silence
+        </button>
+        <button class="btn btn-action" id="transcribeBtn" disabled title="Speech to text — Right-click to resume from playhead">
+          Transcribe
+        </button>
+        <button class="btn btn-action" id="diarizeBtn" disabled title="Identify speakers in the audio">
+          Speakers
+        </button>
+      </div>
+
+      <!-- Transcribe Settings (inline under buttons) -->
+      <div class="settings-inline" id="transcribeSettingsSection">
+        <div class="select-row">
+          <div class="select-col">
+            <label class="input-label">Model</label>
+            <select class="input-select" id="modelSelect">
+              <option value="tiny">Tiny — fast</option>
+              <option value="base">Base</option>
+              <option value="small">Small</option>
+              <option value="medium">Medium</option>
+              <option value="large-v3" selected>Large V3 — best</option>
+            </select>
+          </div>
+          <div class="select-col">
+            <label class="input-label">Language</label>
+            <select class="input-select" id="languageSelect">
+              <option value="">Auto-detect</option>
+              <option value="vi">Vietnamese</option>
+              <option value="en">English</option>
+              <option value="zh">Chinese</option>
+              <option value="ja">Japanese</option>
+            </select>
+          </div>
+        </div>
+        <div class="model-info" id="modelInfo"></div>
+        <label class="checkbox-row" id="diarizeCheckRow">
+          <input type="checkbox" id="includeSpeakersCheck" />
+          <span class="checkbox-label">Identify speakers after transcribe</span>
+        </label>
+      </div>
+
+      <!-- Progress -->
+      <div class="progress-container hidden" id="progressContainer">
+        <div class="progress-header">
+          <span class="progress-stage" id="progressStage">Preparing...</span>
+          <span class="progress-percent" id="progressPercent">0%</span>
+          <button class="btn-progress-cancel" id="progressCancelBtn" title="Cancel">✕</button>
+        </div>
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div class="progress-footer">
+          <span class="progress-elapsed" id="progressElapsed">0:00</span>
+          <span class="progress-eta" id="progressEta"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Waveform -->
+    <div class="section" id="waveformSection">
+      <div class="section-header">
+        <span class="section-header-left">
+          <span class="section-label">Waveform</span>
+          <button class="btn-icon-sm" id="cutSettingsBtn" title="Cut settings">&#9881;</button>
+        </span>
+        <span class="section-count" id="waveformTime">0:00 / 0:00</span>
+      </div>
+      <!-- Cut settings panel (hidden by default) -->
+      <div class="cut-settings-panel hidden" id="cutSettingsPanel">
+        <div class="control-row">
+          <label class="control-label">Padding before</label>
+          <input type="range" class="control-slider" id="paddingBefore" min="0" max="500" value="100" step="10" />
+          <span class="control-value" id="paddingBeforeVal">100ms</span>
+        </div>
+        <div class="control-row">
+          <label class="control-label">Padding after</label>
+          <input type="range" class="control-slider" id="paddingAfter" min="0" max="500" value="100" step="10" />
+          <span class="control-value" id="paddingAfterVal">100ms</span>
+        </div>
+        <div class="control-row">
+          <label class="control-label">Min silence</label>
+          <input type="range" class="control-slider" id="minSilence" min="100" max="2000" value="500" step="50" />
+          <span class="control-value" id="minSilenceVal">500ms</span>
+        </div>
+        <div class="control-row">
+          <label class="control-label">Silence threshold</label>
+          <input type="range" class="control-slider" id="silenceThresh" min="-60" max="-15" value="-30" step="1" />
+          <span class="control-value" id="silenceThreshVal">-30dB</span>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="previewBtn">Preview Cuts</button>
+        </div>
+        <span class="section-count" id="cutStats"></span>
+      </div>
+      <div class="section-body waveform-body">
+        <!-- Playback controls -->
+        <div class="playback-bar">
+          <button class="btn-playback" id="playBtn" title="Play/Pause">
+            <span id="playIcon">&#9654;</span>
+          </button>
+          <button class="btn-playback" id="stopBtn" title="Stop">&#9632;</button>
+          <div class="playback-time">
+            <span id="currentTime">0:00.00</span>
+            <span class="time-sep">/</span>
+            <span id="totalTime">0:00.00</span>
+          </div>
+          <div class="playback-spacer"></div>
+          <div class="zoom-controls">
+            <button class="btn-playback btn-sm" id="zoomOutBtn" title="Zoom out">-</button>
+            <span class="zoom-level" id="zoomLevel">1x</span>
+            <button class="btn-playback btn-sm" id="zoomInBtn" title="Zoom in">+</button>
+            <button class="btn-playback btn-sm" id="zoomFitBtn" title="Fit all">Fit</button>
+          </div>
+        </div>
+        <!-- Waveform canvas (scrollable when zoomed) -->
+        <div class="waveform-scroll" id="waveformScroll">
+          <div class="waveform-wrap" id="waveformWrap">
+            <canvas id="waveformCanvas"></canvas>
+            <div class="waveform-playhead" id="waveformPlayhead"></div>
+            <div class="waveform-tooltip hidden" id="waveformTooltip"></div>
+          </div>
+        </div>
+        <!-- Overview (minimap when zoomed) -->
+        <div class="waveform-overview hidden" id="waveformOverview">
+          <canvas id="overviewCanvas"></canvas>
+          <div class="overview-viewport" id="overviewViewport"></div>
+        </div>
+        <div class="waveform-legend">
+          <span class="legend-item"><span class="legend-dot speech"></span>Speech</span>
+          <span class="legend-item"><span class="legend-dot silence"></span>Silence</span>
+          <span class="legend-item"><span class="legend-dot breath"></span>Breath</span>
+          <span class="legend-item"><span class="legend-dot marker"></span>Cut</span>
+        </div>
+      </div>
+      <!-- Hidden audio element for playback -->
+      <audio id="audioPlayer" preload="auto"></audio>
+    </div>
+
+    <!-- Segments -->
+    <div class="section" id="segmentsSection">
+      <div class="section-header">
+        <span class="section-header-left">
+          <span class="section-label">Segments</span>
+          <button class="btn-icon-sm" id="segmentSettingsBtn" title="Display settings">&#9881;</button>
+          <button class="btn-icon-sm toggle-view" id="textViewToggle" title="Toggle text-only view">&#9776;</button>
+        </span>
+        <span class="section-count" id="segmentCount">0 found</span>
+      </div>
+      <!-- Segment display settings popover -->
+      <div class="segment-settings hidden" id="segmentSettingsPanel">
+        <span class="seg-setting-label">Display mode</span>
+        <div class="seg-setting-options-col">
+          <label class="seg-radio"><input type="radio" name="lineBreakMode" value="natural" checked /><span>Natural sentences</span></label>
+          <label class="seg-radio"><input type="radio" name="lineBreakMode" value="word" /><span>Word by word</span></label>
+          <label class="seg-radio"><input type="radio" name="lineBreakMode" value="punctuation" /><span>By punctuation (.!?,;)</span></label>
+          <label class="seg-radio"><input type="radio" name="lineBreakMode" value="maxWords" /><span>Max words per line</span></label>
+          <div class="seg-setting-slider-row seg-sub-option hidden" id="maxWordsRow">
+            <input type="range" class="control-slider" id="maxWordsSlider" min="2" max="20" value="5" step="1" />
+            <span class="control-value" id="maxWordsVal">5</span>
+          </div>
+        </div>
+      </div>
+      <div class="section-body">
+        <div class="filter-bar">
+          <div class="filter-tabs">
+            <button class="filter-tab active" data-filter="all">All</button>
+            <button class="filter-tab" data-filter="speech">Speech</button>
+            <button class="filter-tab" data-filter="silence">Silence</button>
+            <button class="filter-tab" data-filter="translation">Translation</button>
+          </div>
+          <div class="filter-actions">
+            <button class="btn-icon-sm" id="searchToggleBtn" title="Search & Replace">🔍</button>
+          </div>
+        </div>
+
+        <!-- Search & Replace floating panel -->
+        <div class="search-panel hidden" id="searchPanel">
+          <div class="search-row">
+            <input type="text" class="input-text search-input" id="searchInput" placeholder="Search..." />
+            <span class="search-nav">
+              <span class="search-count" id="searchCount"></span>
+              <button class="btn-icon-xs" id="searchPrevBtn" title="Previous">&#9650;</button>
+              <button class="btn-icon-xs" id="searchNextBtn" title="Next">&#9660;</button>
+            </span>
+          </div>
+          <div class="search-row">
+            <input type="text" class="input-text search-input" id="replaceInput" placeholder="Replace..." />
+            <button class="btn btn-xs" id="replaceOneBtn">Replace</button>
+            <button class="btn btn-xs" id="replaceAllBtn">All</button>
+          </div>
+        </div>
+
+        <!-- Translation language tabs (visible on Translation tab) -->
+        <div class="trans-tabs hidden" id="transTabs">
+          <div class="trans-tab-list" id="transTabList">
+            <!-- Language tabs inserted dynamically -->
+          </div>
+          <button class="trans-tab-add" id="transAddBtn" title="Add language">+</button>
+          <div class="trans-tab-spacer"></div>
+          <button class="btn btn-primary btn-xs" id="translateBtn" disabled>Translate</button>
+        </div>
+        <!-- Language picker popup -->
+        <div class="lang-picker hidden" id="langPicker">
+          <div class="lang-picker-list" id="langPickerList"></div>
+        </div>
+
+        <div class="segment-list" id="segmentList">
+          <div class="segment-empty">Load audio and run Detect Silence or Transcribe</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cut Controls section removed — controls moved into Waveform settings panel -->
+
+    <!-- Export -->
+    <div class="section" id="exportSection">
+      <div class="section-header clickable" id="exportToggle">
+        <span class="section-label">Export</span>
+        <span class="section-count" id="exportChevron">&#9654;</span>
+      </div>
+      <div class="section-body hidden" id="exportBody">
+        <div class="btn-row">
+          <button class="btn btn-primary" id="exportXmlBtn" disabled>Export XML</button>
+        </div>
+        <div class="export-group mt-8">
+          <span class="export-group-label">Subtitles (SRT)</span>
+          <div class="btn-row">
+            <button class="btn" id="exportSrtOrigBtn" disabled>Original Timecode</button>
+            <button class="btn" id="exportSrtCutBtn" disabled>After Cuts</button>
+          </div>
+          <div class="transcribe-hint hidden" id="transcribeHint">
+            Run <strong>Transcribe</strong> first to enable subtitle export
+          </div>
+        </div>
+        <div class="export-folder-row">
+          <span class="export-folder-label">Save to:</span>
+          <span class="export-folder-path" id="exportFolderPath" title="Click to change">~/Downloads</span>
+          <button class="btn btn-xs" id="chooseFolderBtn" title="Choose folder">📁</button>
+        </div>
+        <div class="export-info" id="exportInfo"></div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="section" id="settingsSection">
+      <div class="section-header clickable" id="settingsToggle">
+        <span class="section-label">Settings</span>
+        <span class="section-count" id="settingsChevron">&#9654;</span>
+      </div>
+      <div class="section-body hidden" id="settingsBody">
+        <div class="control-row">
+          <label class="control-label">HF Token</label>
+          <input type="password" class="input-text" id="hfTokenInput" placeholder="hf_..." style="flex:1" />
+        </div>
+        <div class="settings-hint">Required for speaker diarization. <a href="https://huggingface.co/settings/tokens" target="_blank" style="color:var(--accent)">Get token</a></div>
+        <div class="control-row mt-8">
+          <label class="control-label">Translation</label>
+          <select class="input-select" id="translationProvider" style="flex:1">
+            <option value="ollama">Ollama (Local)</option>
+            <option value="claude">Claude API (Cloud)</option>
+          </select>
+        </div>
+        <div class="control-row mt-6" id="ollamaUrlRow">
+          <label class="control-label">Ollama URL</label>
+          <input type="text" class="input-text" id="ollamaUrlInput" placeholder="http://localhost:11434" value="http://localhost:11434" style="flex:1" />
+        </div>
+        <div class="control-row mt-6" id="claudeKeyRow">
+          <label class="control-label">API Key</label>
+          <input type="password" class="input-text" id="claudeApiKeyInput" placeholder="sk-ant-..." style="flex:1" />
+        </div>
+        <div class="btn-row mt-8">
+          <button class="btn btn-primary btn-block" id="saveSettingsBtn">Save Settings</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ==================== LIVE TAB ==================== -->
+  <div class="panel-body tab-content hidden" id="livePanel">
+
+    <!-- Live Setup — hidden when running -->
+    <div id="liveSetupSection">
+      <!-- Live Input Source -->
+      <div class="section">
+        <div class="section-header">
+          <span class="section-label">Input Source</span>
+        </div>
+        <div class="section-body">
+          <div class="live-source-options">
+            <button class="btn btn-live-source active" id="liveSrcMic" title="Record from microphone">Microphone</button>
+            <button class="btn btn-live-source" id="liveSrcSystem" title="Capture system audio or browser tab">System Audio</button>
+          </div>
+          <div class="live-source-detail" id="liveMicDetail">
+            <select class="input-select" id="liveMicSelect">
+              <option value="default">Default Microphone</option>
+            </select>
+          </div>
+          <div class="live-source-detail hidden" id="liveSystemDetail">
+            <div class="live-browser-hint">
+              Capture audio playing on your computer.<br>
+              <span class="hint-sub">A screen/tab sharing dialog will appear — select any tab or screen.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Live Transcribe Settings -->
+      <div class="section">
+        <div class="section-body">
+          <div class="settings-inline">
+            <div class="select-row">
+              <div class="select-col">
+                <label class="input-label">Model</label>
+                <select class="input-select" id="liveModelSelect">
+                  <option value="large-v3-turbo" selected>Turbo</option>
+                  <option value="small">Small — balanced</option>
+                  <option value="base">Base — fast</option>
+                  <option value="tiny">Tiny — fastest</option>
+                  <option value="medium">Medium</option>
+                  <option value="large-v3">Large V3 — slowest</option>
+                </select>
+              </div>
+              <div class="select-col">
+                <label class="input-label">Language</label>
+                <select class="input-select" id="liveLanguageSelect">
+                  <option value="">Auto-detect</option>
+                  <option value="vi">Vietnamese</option>
+                  <option value="en">English</option>
+                  <option value="zh">Chinese</option>
+                  <option value="ja">Japanese</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- Start button -->
+      <div class="live-controls mt-6">
+        <button class="btn btn-primary btn-live-start" id="liveStartBtn">● Start</button>
+      </div>
+    </div>
+
+    <!-- Live Running Bar — visible when running/paused -->
+    <div id="liveRunningBar" class="hidden">
+      <div class="live-running-bar">
+        <div class="live-running-left">
+          <div class="live-timer" id="liveTimer">
+            <span class="live-rec-dot"></span>
+            <span id="liveElapsed">0:00</span>
+          </div>
+          <span class="live-status-inline" id="liveStatus"></span>
+        </div>
+        <div class="live-running-right">
+          <button class="btn btn-live-pause" id="livePauseBtn">⏸ Pause</button>
+          <button class="btn btn-live-stop" id="liveStopBtn">■ Stop</button>
+          <button class="btn btn-primary btn-live-start hidden" id="liveContinueBtn">● Continue</button>
+          <button class="btn btn-live-new hidden" id="liveNewBtn">↺ New</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Segments -->
+    <div class="section" id="liveSegmentsSection">
+      <div class="section-header">
+        <span class="section-header-left">
+          <span class="section-label">Segments</span>
+          <button class="btn-icon-sm toggle-view" id="liveTextViewToggle" title="Toggle text-only view">&#9776;</button>
+        </span>
+        <span class="section-count" id="liveSegmentCount">0 segments</span>
+      </div>
+      <div class="section-body">
+        <div class="filter-bar">
+          <div class="filter-tabs">
+            <button class="filter-tab active" data-live-filter="speech">Speech</button>
+            <button class="filter-tab" data-live-filter="translation">Translation</button>
+          </div>
+          <div class="filter-actions">
+            <button class="btn-icon-sm" id="liveSearchToggleBtn" title="Search & Replace">🔍</button>
+          </div>
+        </div>
+        <!-- Translation language tabs (visible when Translation tab active) -->
+        <div class="trans-tabs hidden" id="liveTransTabs">
+          <div class="trans-tab-list" id="liveTransTabList"></div>
+          <button class="trans-tab-add" id="liveTransAddBtn" title="Add language (max 2)">+</button>
+          <div class="trans-tab-spacer"></div>
+        </div>
+        <div class="lang-picker hidden" id="liveLangPicker">
+          <div class="lang-picker-list" id="liveLangPickerList"></div>
+        </div>
+
+        <!-- Search & Replace -->
+        <div class="search-panel hidden" id="liveSearchPanel">
+          <div class="search-row">
+            <input type="text" class="input-text search-input" id="liveSearchInput" placeholder="Search..." />
+            <span class="search-nav">
+              <span class="search-count" id="liveSearchCount"></span>
+              <button class="btn-icon-xs" id="liveSearchPrevBtn" title="Previous">&#9650;</button>
+              <button class="btn-icon-xs" id="liveSearchNextBtn" title="Next">&#9660;</button>
+            </span>
+          </div>
+          <div class="search-row">
+            <input type="text" class="input-text search-input" id="liveReplaceInput" placeholder="Replace..." />
+            <button class="btn btn-xs" id="liveReplaceOneBtn">Replace</button>
+            <button class="btn btn-xs" id="liveReplaceAllBtn">All</button>
+          </div>
+        </div>
+        <!-- Live segment list -->
+        <div class="segment-list" id="liveSegmentList">
+          <div class="segment-empty">Select an input source and press Start</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Export -->
+    <div class="section">
+      <div class="section-header clickable" id="liveExportToggle">
+        <span class="section-label">Export</span>
+        <span class="section-count" id="liveExportChevron">&#9654;</span>
+      </div>
+      <div class="section-body hidden" id="liveExportBody">
+        <div class="btn-row">
+          <button class="btn btn-primary" id="liveExportTxtBtn" disabled>Export Text</button>
+          <button class="btn" id="liveExportSrtBtn" disabled>Export SRT</button>
+        </div>
+        <div class="export-info" id="liveExportInfo"></div>
+      </div>
+    </div>
+
+    <!-- Settings (shared — same as Editor) -->
+    <div class="section" id="liveSettingsSection">
+      <div class="section-header clickable" id="liveSettingsToggle">
+        <span class="section-label">Settings</span>
+        <span class="section-count" id="liveSettingsChevron">&#9654;</span>
+      </div>
+      <div class="section-body hidden" id="liveSettingsBody">
+        <div class="control-row">
+          <label class="control-label">HF Token</label>
+          <input type="password" class="input-text" id="liveHfTokenInput" placeholder="hf_..." style="flex:1" />
+        </div>
+        <div class="settings-hint">Required for speaker identification.</div>
+        <div class="control-row mt-8">
+          <label class="control-label">Translation</label>
+          <select class="input-select" id="liveTransProvider" style="flex:1">
+            <option value="ollama">Ollama (Local)</option>
+            <option value="claude">Claude API (Cloud)</option>
+          </select>
+        </div>
+        <div class="control-row mt-6" id="liveOllamaUrlRow">
+          <label class="control-label">Ollama URL</label>
+          <input type="text" class="input-text" id="liveOllamaUrlInput" placeholder="http://localhost:11434" value="http://localhost:11434" style="flex:1" />
+        </div>
+        <div class="control-row mt-6" id="liveClaudeKeyRow">
+          <label class="control-label">API Key</label>
+          <input type="password" class="input-text" id="liveClaudeApiKeyInput" placeholder="sk-ant-..." style="flex:1" />
+        </div>
+        <div class="btn-row mt-8">
+          <button class="btn btn-primary btn-block" id="liveSaveSettingsBtn">Save Settings</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Export XML Dialog (modal overlay) -->
+  <div class="modal-overlay hidden" id="exportDialog">
+    <div class="modal-content">
+      <div class="modal-title">Export XML Options</div>
+      <label class="modal-option">
+        <input type="checkbox" id="exportOptSubtitles" />
+        <span>Include subtitles (SRT file)</span>
+      </label>
+      <div class="modal-sub-options hidden" id="exportSubLangOptions">
+        <!-- Language checkboxes inserted dynamically -->
+      </div>
+      <label class="modal-option">
+        <input type="checkbox" id="exportOptMulticam" disabled />
+        <span>Multi-track by speaker (1 video track per speaker)</span>
+      </label>
+      <div class="modal-hint" id="exportMulticamHint">Run Speakers first to enable multicam</div>
+      <div class="btn-row mt-8">
+        <button class="btn" id="exportDialogCancel">Cancel</button>
+        <button class="btn btn-primary" id="exportDialogConfirm">Export</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Translate Dialog (modal overlay) -->
+  <div class="modal-overlay hidden" id="translateDialog">
+    <div class="modal-content">
+      <div class="modal-title">Translate Languages</div>
+      <div class="modal-desc">Select languages to translate:</div>
+      <div id="translateDialogLangs">
+        <!-- Language checkboxes inserted dynamically -->
+      </div>
+      <div class="btn-row mt-8">
+        <button class="btn" id="translateDialogCancel">Cancel</button>
+        <button class="btn btn-primary" id="translateDialogConfirm">Translate</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="index.js"></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+# Build outputs
+dist/
+backend/build/
+
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Uploads / temp
+easyscript_uploads/
+*.tmp
+*.wav.tmp
+
+# Logs
+*.log
