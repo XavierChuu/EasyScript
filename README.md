@@ -6,6 +6,45 @@ Built for macOS (Apple Silicon optimized with Metal GPU acceleration) and Window
 
 ---
 
+## Screenshots
+
+### Editor Mode — Main Interface
+Load audio files, detect silence, transcribe speech, and identify speakers — all from a clean, intuitive interface with waveform visualization.
+
+![Editor Mode Overview](docs/images/01-editor-overview.png)
+
+### Waveform & Speaker Diarization
+Interactive waveform viewer with color-coded speech/silence/breath segments. After running speaker diarization, each segment is labeled with the identified speaker (Speaker A, B, C...) in distinct colors.
+
+![Waveform with Speakers](docs/images/02-editor-waveform-speakers.png)
+
+### Speech Segments with Speaker Labels
+Transcribed segments are displayed with speaker identification, timecodes, and the transcribed text. Filter by All, Speech, Silence, or Translation tabs.
+
+![Segments with Speaker Labels](docs/images/03-segments-speaker-labels.png)
+
+### Display Mode Settings
+Choose how text is displayed: Natural sentences, Word by word, By punctuation, or Max words per line — flexible formatting for different use cases.
+
+![Display Modes](docs/images/04-display-modes.png)
+
+### Translation — Language Selection
+Translate transcriptions into 30+ languages. Click "+" to add a target language from the language picker with support for Vietnamese, Chinese, Japanese, Korean, Thai, and many more.
+
+![Translation Languages](docs/images/05-translation-languages.png)
+
+### Translation — Text View
+View translations in a continuous text format. Add multiple target languages (e.g., Vietnamese + Japanese) with tabs to switch between them.
+
+![Translation Text View](docs/images/06-translation-text-view.png)
+
+### Live Mode — Real-time Transcription
+Record from your microphone and get real-time transcription with sentence-level splitting. Choose the Turbo model for fast Vietnamese transcription, or any other model for your language.
+
+![Live Mode](docs/images/07-live-mode.png)
+
+---
+
 ## Features
 
 ### Editor Mode — File-based Transcription
