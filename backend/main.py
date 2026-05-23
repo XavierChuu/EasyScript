@@ -60,13 +60,19 @@ def start_server(port, frontend_dir):
         async def serve_index():
             return index_html
 
+        @app.get("/plugin/index.html", response_class=HTMLResponse)
+        async def serve_plugin_index():
+            return index_html
+
         @app.get("/styles.css")
+        @app.get("/plugin/styles.css")
         async def serve_css():
             css_path = os.path.join(frontend_dir, "styles.css")
             with open(css_path, "r", encoding="utf-8") as f:
                 return Response(content=f.read(), media_type="text/css")
 
         @app.get("/index.js")
+        @app.get("/plugin/index.js")
         async def serve_js():
             js_path = os.path.join(frontend_dir, "index.js")
             with open(js_path, "r", encoding="utf-8") as f:
@@ -154,8 +160,18 @@ def main():
             time.sleep(0.1)
     mlog(f"[main] Server ready: {server_ready}")
 
-    # Launch pywebview window
+    # Launch pywebview window with JS API
     import webview
+    import webbrowser
+
+    class Api:
+        """JS-callable API exposed as window.pywebview.api"""
+        def open_browser(self, url=None):
+            """Open EasyScript in the user's default browser for System Audio support."""
+            target = url or f"http://127.0.0.1:{port}/plugin/index.html"
+            webbrowser.open(target)
+
+    api = Api()
 
     window = webview.create_window(
         title="EasyScript",
@@ -164,6 +180,7 @@ def main():
         height=900,
         min_size=(400, 600),
         text_select=True,
+        js_api=api,
     )
 
     webview.start(debug=("--debug" in sys.argv))

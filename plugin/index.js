@@ -3390,9 +3390,17 @@ function initLiveTab() {
       // System audio capture — uses getDisplayMedia
       // pywebview (WebKit) does not support getDisplayMedia
       if (window.pywebview || !navigator.mediaDevices.getDisplayMedia) {
+        // Auto-open in default browser for System Audio support
+        if (window.pywebview && window.pywebview.api) {
+          try { window.pywebview.api.open_browser(); } catch(e) {}
+        } else {
+          // Fallback: try window.open with current BACKEND_URL
+          try { window.open(BACKEND_URL + "/plugin/index.html", "_blank"); } catch(e) {}
+        }
         throw new Error(
-          "System Audio is not supported in the desktop app.\n" +
-          "Use Microphone instead, or open in browser for System Audio."
+          "System Audio requires a browser.\n" +
+          "Opening EasyScript in your default browser...\n" +
+          "Use the browser window to capture tab audio."
         );
       }
 
