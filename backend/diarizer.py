@@ -115,10 +115,18 @@ class Diarizer:
 
         from pyannote.audio import Pipeline
 
-        self.pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=self.hf_token,
-        )
+        # pyannote 3.x uses `use_auth_token`, 4.x renamed it to `token`.
+        # Try the new API first, fall back to old.
+        try:
+            self.pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                token=self.hf_token,
+            )
+        except TypeError:
+            self.pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                use_auth_token=self.hf_token,
+            )
 
         # Use GPU when available (CUDA or MPS)
         if self.device in ("cuda", "mps"):

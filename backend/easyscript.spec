@@ -6,7 +6,7 @@ Bundles: FastAPI backend + pywebview + frontend (plugin/) + ML libs.
 import os
 import sys
 import platform
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 block_cipher = None
 
@@ -65,6 +65,20 @@ try:
 except Exception:
     pass
 
+# Package metadata (.dist-info) — required by importlib.metadata.version() calls
+# inside transformers/audio_utils.py, etc. PyInstaller doesn't include
+# .dist-info folders by default, causing StopIteration errors at runtime.
+package_metadata = []
+for _pkg in (
+    "torchcodec", "torchaudio", "torch", "transformers", "tokenizers",
+    "huggingface_hub", "soundfile", "demucs", "pyannote.audio",
+    "pyannote.core", "scipy", "numpy", "faster_whisper", "ctranslate2",
+):
+    try:
+        package_metadata += copy_metadata(_pkg)
+    except Exception:
+        pass
+
 # MLX data + binaries (Apple Silicon only)
 mlx_data = []
 mlx_binaries = []
@@ -85,7 +99,7 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=mlx_binaries + torchcodec_binaries + ffmpeg_binaries,
-    datas=faster_whisper_data + ctranslate2_data + scipy_data + pyannote_data + speechbrain_data + torchcodec_data + mlx_data + demucs_data + transformers_data + plugin_files + [
+    datas=faster_whisper_data + ctranslate2_data + scipy_data + pyannote_data + speechbrain_data + torchcodec_data + mlx_data + demucs_data + transformers_data + package_metadata + plugin_files + [
         ("server.py", "."),
         ("transcriber.py", "."),
         ("silence_detector.py", "."),
@@ -175,7 +189,8 @@ a = Analysis(
     + collect_submodules("speechbrain")
     + collect_submodules("pytorch_lightning")
     + collect_submodules("lightning_fabric")
-    + collect_submodules("torchcodec"),
+    + collect_submodules("torchcodec")
+    + collect_submodules("transformers"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

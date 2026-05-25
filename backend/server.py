@@ -452,16 +452,25 @@ def _separate_vocals(audio_path):
     if os.path.isfile(vocals_path):
         return vocals_path
 
-    runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_demucs_runner.py")
+    # Detect if running in PyInstaller bundle (sys.executable is not Python).
+    bundled = getattr(sys, 'frozen', False) or getattr(sys, '_MEIPASS', None) is not None
+
     try:
-        result = subprocess.run(
-            [sys.executable, runner, output_dir, audio_path],
-            capture_output=True, text=True, timeout=900,
-        )
-        if result.returncode != 0:
-            print(f"[demucs] returncode={result.returncode}")
-            print(f"[demucs] stderr (tail):\n{result.stderr[-800:]}")
-            return None
+        if bundled:
+            # In bundled mode, invoke the runner in-process.
+            from _demucs_runner import run_demucs_main
+            run_demucs_main(output_dir, audio_path)
+        else:
+            runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_demucs_runner.py")
+            result = subprocess.run(
+                [sys.executable, runner, output_dir, audio_path],
+                capture_output=True, text=True, timeout=900,
+            )
+            if result.returncode != 0:
+                print(f"[demucs] returncode={result.returncode}")
+                print(f"[demucs] stderr (tail):\n{result.stderr[-800:]}")
+                return None
+
         if os.path.isfile(vocals_path):
             return vocals_path
         # Fallback: find any vocals.wav under matching basename folder
@@ -469,7 +478,6 @@ def _separate_vocals(audio_path):
             for f in files:
                 if f == "vocals.wav" and basename in root:
                     return os.path.join(root, f)
-        print(f"[demucs] stdout (tail):\n{result.stdout[-400:]}")
         return None
     except Exception as e:
         print(f"[demucs] Exception: {e}")
@@ -964,18 +972,33 @@ def _run_hymt2_download(model_size: str):
         model_id = HyMT2Translator.MODELS.get(model_size, HyMT2Translator.MODELS["1.8B"])
         cache_dir = HyMT2Translator.CACHE_DIR
         os.makedirs(cache_dir, exist_ok=True)
-        # Run download in a separate subprocess to isolate from server process
-        result = subprocess.run(
-            [sys.executable, "-c",
-             f"from huggingface_hub import snapshot_download; "
-             f"snapshot_download(repo_id='{model_id}', cache_dir=r'{cache_dir}', ignore_patterns=['*.bin']);"
-             f"print('done')"],
-            capture_output=True, text=True, timeout=3600,
-        )
-        if result.returncode == 0:
+
+        # Detect if running in PyInstaller bundle. In that case sys.executable
+        # is the bundled .app binary, not Python — so subprocess calls with
+        # `-c` will fail. Download in-process instead.
+        bundled = getattr(sys, 'frozen', False) or getattr(sys, '_MEIPASS', None) is not None
+
+        if bundled:
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                repo_id=model_id,
+                cache_dir=cache_dir,
+                ignore_patterns=["*.bin"],
+            )
             hymt2_download_progress = {"status": "done", "progress": 1.0, "detail": f"Hy-MT2 {model_size} downloaded successfully!"}
         else:
-            hymt2_download_progress = {"status": "error", "progress": 0.0, "detail": result.stderr[-500:] or "Download failed"}
+            # Dev mode: use subprocess for isolation
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 f"from huggingface_hub import snapshot_download; "
+                 f"snapshot_download(repo_id='{model_id}', cache_dir=r'{cache_dir}', ignore_patterns=['*.bin']);"
+                 f"print('done')"],
+                capture_output=True, text=True, timeout=3600,
+            )
+            if result.returncode == 0:
+                hymt2_download_progress = {"status": "done", "progress": 1.0, "detail": f"Hy-MT2 {model_size} downloaded successfully!"}
+            else:
+                hymt2_download_progress = {"status": "error", "progress": 0.0, "detail": result.stderr[-500:] or "Download failed"}
     except subprocess.TimeoutExpired:
         hymt2_download_progress = {"status": "error", "progress": 0.0, "detail": "Timeout sau 1 giờ"}
     except Exception as e:

@@ -61,17 +61,9 @@ def _install_torchaudio_soundfile_patches():
         torchaudio.list_audio_backends = lambda: ["soundfile"]
 
 
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: _demucs_runner.py <output_dir> <audio_path>", file=sys.stderr)
-        sys.exit(2)
-
-    output_dir = sys.argv[1]
-    audio_path = sys.argv[2]
-
+def run_demucs_main(output_dir, audio_path):
+    """In-process entry point (callable from bundled app)."""
     _install_torchaudio_soundfile_patches()
-
-    # Use Demucs Python API directly so our patches stay in effect
     from demucs.separate import main as demucs_main
     demucs_main([
         "--two-stems=vocals",
@@ -79,6 +71,13 @@ def main():
         "-o", output_dir,
         audio_path,
     ])
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: _demucs_runner.py <output_dir> <audio_path>", file=sys.stderr)
+        sys.exit(2)
+    run_demucs_main(sys.argv[1], sys.argv[2])
 
 
 if __name__ == "__main__":

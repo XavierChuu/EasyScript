@@ -1331,42 +1331,92 @@ function renderTranslationSegments() {
 
   // ── Text-only view: original italic on top, translation below ──
   if (segTextView) {
-    const block = document.createElement("div");
-    block.className = "text-view-block text-view-trans";
-    // Original text — italic, smaller
-    const origP = document.createElement("p");
-    origP.className = "text-view-original";
-    speechSegs.forEach((seg) => {
-      const span = document.createElement("span");
-      span.className = "text-view-span";
-      span.dataset.start = seg.start;
-      span.dataset.end = seg.end;
-      span.textContent = seg.text.trim();
-      span.title = `${formatTime(seg.start)} – ${formatTime(seg.end)}`;
-      span.addEventListener("click", () => seekToSegment(seg));
-      origP.appendChild(span);
-      origP.appendChild(document.createTextNode(" "));
-    });
-    block.appendChild(origP);
-    // Translation text
-    const transP = document.createElement("p");
-    transP.className = "text-view-translation";
-    speechSegs.forEach((seg, i) => {
-      const transText = langData[i] ? langData[i].text : "";
-      if (transText) {
+    const hasSpeakers = speechSegs.some(s => s.speaker && speakerMap[s.speaker]);
+
+    // Helper to build a paragraph of spans from a slice of segments
+    function buildSpans(segs, useTranslation) {
+      const frag = document.createDocumentFragment();
+      segs.forEach((segRef) => {
+        const { seg, idx } = segRef;
+        const text = useTranslation
+          ? (langData[idx] ? langData[idx].text : "")
+          : seg.text.trim();
+        if (!text) return;
         const span = document.createElement("span");
         span.className = "text-view-span";
         span.dataset.start = seg.start;
         span.dataset.end = seg.end;
-        span.textContent = transText.trim();
+        span.textContent = text.trim();
         span.title = `${formatTime(seg.start)} – ${formatTime(seg.end)}`;
         span.addEventListener("click", () => seekToSegment(seg));
-        transP.appendChild(span);
-        transP.appendChild(document.createTextNode(" "));
-      }
-    });
-    block.appendChild(transP);
-    list.appendChild(block);
+        frag.appendChild(span);
+        frag.appendChild(document.createTextNode(" "));
+      });
+      return frag;
+    }
+
+    if (hasSpeakers) {
+      // Group consecutive segments by speaker — each group has its own block
+      // showing speaker label + original + translation
+      let currentSpeaker = null;
+      let currentGroup = [];
+
+      const flushGroup = () => {
+        if (currentGroup.length === 0) return;
+        const block = document.createElement("div");
+        block.className = "text-view-block text-view-speaker-block text-view-trans";
+
+        // Speaker label
+        const spk = currentGroup[0].seg.speaker;
+        if (spk && speakerMap[spk]) {
+          const colorIdx = getSpeakerColorIndex(spk);
+          const label = document.createElement("span");
+          label.className = "text-view-speaker-label";
+          label.dataset.color = colorIdx;
+          label.textContent = speakerMap[spk];
+          block.appendChild(label);
+        }
+
+        // Original
+        const origP = document.createElement("p");
+        origP.className = "text-view-original";
+        origP.appendChild(buildSpans(currentGroup, false));
+        block.appendChild(origP);
+
+        // Translation
+        const transP = document.createElement("p");
+        transP.className = "text-view-translation";
+        transP.appendChild(buildSpans(currentGroup, true));
+        block.appendChild(transP);
+
+        list.appendChild(block);
+        currentGroup = [];
+      };
+
+      speechSegs.forEach((seg, i) => {
+        const speaker = seg.speaker || "";
+        if (speaker !== currentSpeaker) {
+          flushGroup();
+          currentSpeaker = speaker;
+        }
+        currentGroup.push({ seg, idx: i });
+      });
+      flushGroup();
+    } else {
+      // No speakers → single block
+      const block = document.createElement("div");
+      block.className = "text-view-block text-view-trans";
+      const allRefs = speechSegs.map((seg, i) => ({ seg, idx: i }));
+      const origP = document.createElement("p");
+      origP.className = "text-view-original";
+      origP.appendChild(buildSpans(allRefs, false));
+      block.appendChild(origP);
+      const transP = document.createElement("p");
+      transP.className = "text-view-translation";
+      transP.appendChild(buildSpans(allRefs, true));
+      block.appendChild(transP);
+      list.appendChild(block);
+    }
     return;
   }
 
@@ -1379,9 +1429,18 @@ function renderTranslationSegments() {
 
     const transText = langData[i] ? langData[i].text : "";
 
+    // Build speaker tag if available (matches Speech tab behavior)
+    let speakerHtml = "";
+    if (seg.speaker && speakerMap[seg.speaker]) {
+      const colorIdx = getSpeakerColorIndex(seg.speaker);
+      const label = speakerMap[seg.speaker] || seg.speaker;
+      speakerHtml = `<span class="speaker-tag" data-speaker="${seg.speaker}" data-color="${colorIdx}" title="Click to rename">${label}</span>`;
+    }
+
     item.innerHTML = `
       <div class="segment-row">
         <span class="segment-badge speech">speech</span>
+        ${speakerHtml}
         <span class="segment-time">${formatTime(seg.start)} – ${formatTime(seg.end)}</span>
       </div>
       <div class="segment-text trans-original">${seg.text}</div>
@@ -1394,6 +1453,15 @@ function renderTranslationSegments() {
     `;
 
     item.querySelector(".segment-row").addEventListener("click", () => seekToSegment(seg));
+
+    // Speaker tag click → inline rename (same as Speech tab)
+    const tagEl = item.querySelector(".speaker-tag");
+    if (tagEl) {
+      tagEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        startSpeakerRename(tagEl);
+      });
+    }
 
     const transEl = item.querySelector(".translation-text");
     transEl.addEventListener("blur", () => {

@@ -42,6 +42,13 @@ echo ""
 echo "Building app with PyInstaller..."
 pyinstaller easyscript.spec --distpath "$DIST_DIR" --workpath "$BACKEND_DIR/build" -y
 
+# Post-build: compile .py → .pyc for transformers (it expects .pyc cache at runtime)
+if [ "$(uname)" = "Darwin" ] && [ -d "$DIST_DIR/EasyScript.app/Contents/Frameworks/transformers" ]; then
+  echo ""
+  echo "Compiling transformers .py → .pyc..."
+  python -m compileall -q -b "$DIST_DIR/EasyScript.app/Contents/Frameworks/transformers" 2>&1 | tail -5 || true
+fi
+
 echo ""
 if [ "$(uname)" = "Darwin" ]; then
   echo "=== Build complete ==="
