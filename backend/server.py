@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from transcriber import Transcriber, is_model_cached, MODEL_SIZES
 from silence_detector import SilenceDetector
 from diarizer import Diarizer
-from translator import get_translator, OllamaTranslator
+from translator import get_translator, OllamaTranslator, HyMT2Translator
 
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "easyscript_uploads")
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".easyscript", "settings.json")
@@ -87,6 +87,7 @@ class TranscribeRequest(BaseModel):
     model: str | None = None
     language: str | None = None
     start_from: float = 0.0  # Resume from this time (seconds)
+    song_mode: bool = False  # Separate vocals with Demucs before transcription
 
 class SwitchModelRequest(BaseModel):
     model: str
@@ -99,8 +100,9 @@ class TranslateRequest(BaseModel):
     segments: list[dict]  # [{ text: "...", start: ..., end: ... }]
     source_lang: str
     target_lang: str
-    provider: str = "ollama"  # "ollama" or "claude"
+    provider: str = "ollama"  # "ollama", "claude", or "hymt2"
     model: Optional[str] = None
+    hymt2_model_size: Optional[str] = None
 
 class TranslateOneRequest(BaseModel):
     text: str
@@ -108,6 +110,7 @@ class TranslateOneRequest(BaseModel):
     target_lang: str
     provider: str = "ollama"
     model: Optional[str] = None
+    hymt2_model_size: Optional[str] = None
 
 class SaveFileRequest(BaseModel):
     filename: str
@@ -247,14 +250,8 @@ def generate_peaks(audio_path, num_peaks=800):
 @app.get("/health")
 def health():
     # Check ffmpeg availability
-    ffmpeg_ok = False
-    ffmpeg_path = ""
-    try:
-        r = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True, timeout=5)
-        ffmpeg_path = r.stdout.strip()
-        ffmpeg_ok = bool(ffmpeg_path)
-    except Exception:
-        pass
+    ffmpeg_path = shutil.which("ffmpeg")
+    ffmpeg_ok = bool(ffmpeg_path)
 
     return {
         "status": "ok",
@@ -440,13 +437,73 @@ def autocut(req: AutoCutRequest):
 def get_transcribe_progress():
     return transcribe_progress
 
-def _run_transcribe_worker(audio_path, model, language, start_from):
+def _separate_vocals(audio_path):
+    """Run Demucs to extract vocals. Returns vocals WAV path, or None on failure.
+
+    Invokes _demucs_runner.py which monkey-patches torchaudio.load to use
+    soundfile (bypassing the broken torchcodec dependency on Windows).
+    """
+    import sys
+    basename = os.path.splitext(os.path.basename(audio_path))[0]
+    output_dir = os.path.join(tempfile.gettempdir(), "easyscript_demucs")
+    os.makedirs(output_dir, exist_ok=True)
+
+    vocals_path = os.path.join(output_dir, "htdemucs", basename, "vocals.wav")
+    if os.path.isfile(vocals_path):
+        return vocals_path
+
+    runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_demucs_runner.py")
+    try:
+        result = subprocess.run(
+            [sys.executable, runner, output_dir, audio_path],
+            capture_output=True, text=True, timeout=900,
+        )
+        if result.returncode != 0:
+            print(f"[demucs] returncode={result.returncode}")
+            print(f"[demucs] stderr (tail):\n{result.stderr[-800:]}")
+            return None
+        if os.path.isfile(vocals_path):
+            return vocals_path
+        # Fallback: find any vocals.wav under matching basename folder
+        for root, _dirs, files in os.walk(output_dir):
+            for f in files:
+                if f == "vocals.wav" and basename in root:
+                    return os.path.join(root, f)
+        print(f"[demucs] stdout (tail):\n{result.stdout[-400:]}")
+        return None
+    except Exception as e:
+        print(f"[demucs] Exception: {e}")
+        return None
+
+
+def _run_transcribe_worker(audio_path, model, language, start_from, song_mode=False):
     """Background worker for whisper transcription with chunked processing."""
     global transcriber, transcribe_progress
 
     try:
         # Ensure file is accessible (macOS TCC may block ~/Documents etc.)
         audio_path = ensure_accessible(audio_path)
+
+        # Song mode: isolate vocals with Demucs first, then transcribe the
+        # clean vocal track. This is the industry-standard approach for music
+        # lyrics transcription (used by WhisperX and similar tools).
+        if song_mode:
+            transcribe_progress.update({
+                "progress": 0.02, "stage": "isolating_vocals",
+                "detail": "Isolating vocals from music (Demucs, ~30-90s)...",
+            })
+            vocals_path = _separate_vocals(audio_path)
+            if vocals_path:
+                audio_path = vocals_path
+                transcribe_progress.update({
+                    "progress": 0.30, "stage": "transcribing",
+                    "detail": "Vocals isolated. Transcribing lyrics...",
+                })
+            else:
+                transcribe_progress.update({
+                    "progress": 0.05, "stage": "transcribing",
+                    "detail": "Demucs unavailable or failed - transcribing original audio.",
+                })
 
         _ensure_transcriber()
         # Switch model if needed
@@ -529,6 +586,7 @@ def _run_transcribe_worker(audio_path, model, language, start_from):
             on_progress=on_progress,
             start_from=start_from,
             on_chunk_done=on_chunk_done,
+            song_mode=song_mode,
         )
 
         # Format final segments
@@ -581,7 +639,7 @@ def transcribe_audio(req: TranscribeRequest):
 
     thread = threading.Thread(
         target=_run_transcribe_worker,
-        args=(req.audio_path, req.model, req.language, req.start_from),
+        args=(req.audio_path, req.model, req.language, req.start_from, req.song_mode),
         daemon=True,
     )
     thread.start()
@@ -731,7 +789,7 @@ def diarize_audio(req: DiarizeRequest):
 def get_translate_progress():
     return translate_progress
 
-def _run_translate_worker(segments, source_lang, target_lang, provider, model):
+def _run_translate_worker(segments, source_lang, target_lang, provider, model, hymt2_model_size=None):
     """Background worker for translation with partial result streaming."""
     global translate_progress
 
@@ -748,11 +806,15 @@ def _run_translate_worker(segments, source_lang, target_lang, provider, model):
         kwargs = {}
         if provider == "claude":
             kwargs["api_key"] = settings.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+        elif provider == "hymt2":
+            resolved_size = hymt2_model_size or settings.get("hymt2_model_size", "1.8B")
+            kwargs["model_size"] = resolved_size
         else:
             kwargs["base_url"] = settings.get("ollama_url", "http://localhost:11434")
-
-        if model:
-            kwargs["model"] = model
+            # Use model from request, then saved settings, then env var
+            resolved_model = model or settings.get("ollama_model", "") or os.environ.get("OLLAMA_MODEL", "")
+            if resolved_model:
+                kwargs["model"] = resolved_model
 
         translator = get_translator(provider=provider, **kwargs)
 
@@ -823,7 +885,7 @@ def translate_text(req: TranslateRequest):
 
     thread = threading.Thread(
         target=_run_translate_worker,
-        args=(req.segments, req.source_lang, req.target_lang, req.provider, req.model),
+        args=(req.segments, req.source_lang, req.target_lang, req.provider, req.model, req.hymt2_model_size),
         daemon=True,
     )
     thread.start()
@@ -839,11 +901,14 @@ def translate_one(req: TranslateOneRequest):
     kwargs = {}
     if req.provider == "claude":
         kwargs["api_key"] = settings.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+    elif req.provider == "hymt2":
+        resolved_size = req.hymt2_model_size or settings.get("hymt2_model_size", "1.8B")
+        kwargs["model_size"] = resolved_size
     else:
         kwargs["base_url"] = settings.get("ollama_url", "http://localhost:11434")
-
-    if req.model:
-        kwargs["model"] = req.model
+        resolved_model = req.model or settings.get("ollama_model", "") or os.environ.get("OLLAMA_MODEL", "")
+        if resolved_model:
+            kwargs["model"] = resolved_model
 
     try:
         translator = get_translator(provider=req.provider, **kwargs)
@@ -855,6 +920,18 @@ def translate_one(req: TranslateOneRequest):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# ── Demucs check ──
+
+@app.get("/demucs/check")
+def demucs_check():
+    try:
+        import importlib
+        spec = importlib.util.find_spec("demucs")
+        return {"available": spec is not None}
+    except Exception:
+        return {"available": False}
+
+
 # ── Ollama status check ──
 
 @app.get("/ollama/status")
@@ -862,6 +939,61 @@ def ollama_status():
     settings = load_settings()
     base_url = settings.get("ollama_url", "http://localhost:11434")
     return OllamaTranslator.check_available(base_url)
+
+
+# ── Hy-MT2 status & download ──
+
+hymt2_download_progress = {"status": "idle", "progress": 0.0, "detail": ""}
+
+@app.get("/hymt2/status")
+def hymt2_status(model_size: str = "1.8B"):
+    downloaded = HyMT2Translator.is_downloaded(model_size)
+    model_id = HyMT2Translator.MODELS.get(model_size, model_size)
+    return {
+        "model_size": model_size,
+        "model_id": model_id,
+        "downloaded": downloaded,
+        "download_progress": hymt2_download_progress,
+    }
+
+def _run_hymt2_download(model_size: str):
+    global hymt2_download_progress
+    hymt2_download_progress = {"status": "downloading", "progress": 0.1, "detail": f"Downloading Hy-MT2 {model_size}... (~3GB, may take several minutes)"}
+    try:
+        import sys
+        model_id = HyMT2Translator.MODELS.get(model_size, HyMT2Translator.MODELS["1.8B"])
+        cache_dir = HyMT2Translator.CACHE_DIR
+        os.makedirs(cache_dir, exist_ok=True)
+        # Run download in a separate subprocess to isolate from server process
+        result = subprocess.run(
+            [sys.executable, "-c",
+             f"from huggingface_hub import snapshot_download; "
+             f"snapshot_download(repo_id='{model_id}', cache_dir=r'{cache_dir}', ignore_patterns=['*.bin']);"
+             f"print('done')"],
+            capture_output=True, text=True, timeout=3600,
+        )
+        if result.returncode == 0:
+            hymt2_download_progress = {"status": "done", "progress": 1.0, "detail": f"Hy-MT2 {model_size} downloaded successfully!"}
+        else:
+            hymt2_download_progress = {"status": "error", "progress": 0.0, "detail": result.stderr[-500:] or "Download failed"}
+    except subprocess.TimeoutExpired:
+        hymt2_download_progress = {"status": "error", "progress": 0.0, "detail": "Timeout sau 1 giờ"}
+    except Exception as e:
+        hymt2_download_progress = {"status": "error", "progress": 0.0, "detail": str(e)}
+
+class HyMT2DownloadRequest(BaseModel):
+    model_size: str = "1.8B"
+
+@app.post("/hymt2/download")
+def hymt2_download(req: HyMT2DownloadRequest):
+    model_size = req.model_size
+    if model_size not in HyMT2Translator.MODELS:
+        return JSONResponse(status_code=400, content={"error": f"Invalid model_size. Choose from: {list(HyMT2Translator.MODELS)}"})
+    if hymt2_download_progress.get("status") == "downloading":
+        return {"status": "already_downloading"}
+    thread = threading.Thread(target=_run_hymt2_download, args=(model_size,), daemon=True)
+    thread.start()
+    return {"status": "started", "model_size": model_size}
 
 
 # ── File save endpoint ──

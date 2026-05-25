@@ -375,7 +375,7 @@ async function runAutoCut() {
 
 let _parallelDiarizePromise = null;
 
-async function runTranscribe(resumeFromPlayhead = false) {
+async function runTranscribe(resumeFromPlayhead = false, songMode = false) {
   const audioPath = document.getElementById("audioPathInput").value.trim();
   if (!audioPath) return;
 
@@ -405,6 +405,7 @@ async function runTranscribe(resumeFromPlayhead = false) {
         model: selectedModel,
         language: selectedLang,
         start_from: startFrom,
+        song_mode: songMode,
       }),
     });
 
@@ -1727,20 +1728,22 @@ function clearSearchHighlights() {
 
 function runSearch() {
   const query = document.getElementById("searchInput").value.trim();
-  const countEl = document.getElementById("searchCount");
 
-  // Clear previous highlights
   clearSearchHighlights();
-
   if (!query) return;
 
   const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const regex = new RegExp(`(${escaped})`, "gi");
 
-  // Find and highlight in visible segment text elements
-  const textEls = document.querySelectorAll(".segment-text[contenteditable='true']");
+  // Choose target elements based on active tab
+  let textEls;
+  if (currentFilter === "translation") {
+    textEls = document.querySelectorAll(".translation-text[contenteditable='true']");
+  } else {
+    textEls = document.querySelectorAll(".segment-text[contenteditable='true']:not(.translation-text)");
+  }
+
   textEls.forEach(el => {
-    if (el.classList.contains("translation-text")) return;
     const text = el.textContent;
     const allMatches = [...text.matchAll(new RegExp(escaped, "gi"))];
     if (allMatches.length > 0) {
@@ -1796,22 +1799,27 @@ function replaceCurrent() {
   const replacement = document.getElementById("replaceInput").value;
   if (!query || searchMatches.length === 0 || searchMatchIndex < 0) return;
 
-  // Find the segment that contains the current match
   const match = searchMatches[searchMatchIndex];
-  const segIndex = match.el.dataset.segIndex;
-  if (segIndex !== undefined) {
-    const seg = segments[parseInt(segIndex)];
-    if (seg) {
-      // Replace first occurrence in this segment's text
-      const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const regex = new RegExp(escaped, "i");
-      seg.text = seg.text.replace(regex, replacement);
-    }
-  }
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(escaped, "i");
 
-  // Re-render and re-search
-  const filtered = currentFilter === "all" ? segments : segments.filter(s => s.type === currentFilter);
-  renderSegments(filtered);
+  if (currentFilter === "translation") {
+    // Replace in translationData
+    const idx = parseInt(match.el.dataset.transIndex);
+    const lang = match.el.dataset.transLang;
+    if (!isNaN(idx) && translationData[lang] && translationData[lang][idx]) {
+      translationData[lang][idx].text = translationData[lang][idx].text.replace(regex, replacement);
+    }
+    renderSegments(segments);
+  } else {
+    const segIndex = match.el.dataset.segIndex;
+    if (segIndex !== undefined) {
+      const seg = segments[parseInt(segIndex)];
+      if (seg) seg.text = seg.text.replace(regex, replacement);
+    }
+    const filtered = currentFilter === "all" ? segments : segments.filter(s => s.type === currentFilter);
+    renderSegments(filtered);
+  }
   runSearch();
 }
 
@@ -1823,15 +1831,19 @@ function replaceAll() {
   const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const regex = new RegExp(escaped, "gi");
 
-  segments.forEach(seg => {
-    if (seg.type === "speech" && seg.text) {
-      seg.text = seg.text.replace(regex, replacement);
+  if (currentFilter === "translation" && activeTransLang) {
+    const langData = translationData[activeTransLang];
+    if (langData) {
+      langData.forEach(t => { if (t.text) t.text = t.text.replace(regex, replacement); });
     }
-  });
-
-  // Re-render and re-search
-  const filtered = currentFilter === "all" ? segments : segments.filter(s => s.type === currentFilter);
-  renderSegments(filtered);
+    renderSegments(segments);
+  } else {
+    segments.forEach(seg => {
+      if (seg.type === "speech" && seg.text) seg.text = seg.text.replace(regex, replacement);
+    });
+    const filtered = currentFilter === "all" ? segments : segments.filter(s => s.type === currentFilter);
+    renderSegments(filtered);
+  }
   runSearch();
 }
 
@@ -2735,6 +2747,8 @@ async function runTranslation(targetLangs) {
         `Translating to ${targetLang.toUpperCase()}...`);
 
       const provider = document.getElementById("translationProvider")?.value || "ollama";
+      const ollamaModel = document.getElementById("ollamaModelSelect")?.value || "";
+      const hymt2Size = document.getElementById("hymt2ModelSize")?.value || "1.8B";
 
       await fetchBackend("/translate", {
         method: "POST",
@@ -2743,6 +2757,8 @@ async function runTranslation(targetLangs) {
           source_lang: sourceLang,
           target_lang: targetLang,
           provider: provider,
+          model: provider === "ollama" ? (ollamaModel || undefined) : undefined,
+          hymt2_model_size: provider === "hymt2" ? hymt2Size : undefined,
         }),
       });
 
@@ -2811,6 +2827,8 @@ async function translateSingleSegment(segIndex, lang) {
   const seg = speechSegs[segIndex];
   const sourceLang = getSourceLang() || "auto";
   const provider = document.getElementById("translationProvider")?.value || "ollama";
+  const ollamaModel = document.getElementById("ollamaModelSelect")?.value || "";
+  const hymt2Size = document.getElementById("hymt2ModelSize")?.value || "1.8B";
 
   // Show spinner on the icon
   const icon = document.querySelector(`.trans-retranslate[data-idx="${segIndex}"][data-lang="${lang}"]`);
@@ -2827,6 +2845,8 @@ async function translateSingleSegment(segIndex, lang) {
         source_lang: sourceLang,
         target_lang: lang,
         provider: provider,
+        model: provider === "ollama" ? (ollamaModel || undefined) : undefined,
+        hymt2_model_size: provider === "hymt2" ? hymt2Size : undefined,
       }),
     });
 
@@ -2944,17 +2964,68 @@ function initSettings() {
     chevron.innerHTML = isOpen ? "&#9654;" : "&#9660;";
   });
 
-  // Translation provider toggle
+  // Provider toggle — show/hide relevant settings sections
+  function updateProviderUI(provider) {
+    const isOllama = provider === "ollama";
+    const isHyMT2 = provider === "hymt2";
+    const isClaude = provider === "claude";
+    document.getElementById("ollamaSettings")?.classList.toggle("hidden", !isOllama);
+    document.getElementById("hymt2Settings")?.classList.toggle("hidden", !isHyMT2);
+    document.getElementById("claudeKeyRow")?.classList.toggle("hidden", !isClaude);
+    if (isHyMT2) refreshHyMT2Status();
+  }
+
   const providerSelect = document.getElementById("translationProvider");
   if (providerSelect) {
-    providerSelect.addEventListener("change", () => {
-      const isOllama = providerSelect.value === "ollama";
-      document.getElementById("ollamaUrlRow").classList.toggle("hidden", !isOllama);
-      document.getElementById("claudeKeyRow").classList.toggle("hidden", isOllama);
-    });
-    // Default: show ollama, hide claude
-    document.getElementById("claudeKeyRow").classList.add("hidden");
+    providerSelect.addEventListener("change", () => updateProviderUI(providerSelect.value));
+    updateProviderUI(providerSelect.value);
   }
+
+  // Ollama refresh
+  document.getElementById("ollamaUrlInput")?.addEventListener("change", () => refreshOllamaModels());
+  document.getElementById("refreshOllamaModelsBtn")?.addEventListener("click", () => refreshOllamaModels());
+
+  // Hy-MT2 size change → refresh status
+  document.getElementById("hymt2ModelSize")?.addEventListener("change", refreshHyMT2Status);
+
+  // Hy-MT2 download button
+  document.getElementById("hymt2DownloadBtn")?.addEventListener("click", async () => {
+    const btn = document.getElementById("hymt2DownloadBtn");
+    const statusText = document.getElementById("hymt2StatusText");
+    const size = document.getElementById("hymt2ModelSize")?.value || "1.8B";
+    btn.disabled = true;
+    btn.textContent = "Downloading...";
+    statusText.textContent = "Downloading model — this may take several minutes...";
+    statusText.style.color = "";
+    try {
+      await fetchBackend("/hymt2/download", {
+        method: "POST",
+        body: JSON.stringify({ model_size: size }),
+      });
+      // Poll until download completes
+      let polling = true;
+      while (polling) {
+        await new Promise(r => setTimeout(r, 3000));
+        const data = await fetchBackend(`/hymt2/status?model_size=${size}`);
+        const dlp = data.download_progress || {};
+        if (data.downloaded || dlp.status === "done") {
+          statusText.textContent = `✓ ${data.model_id} ready`;
+          statusText.style.color = "var(--accent)";
+          polling = false;
+        } else if (dlp.status === "error") {
+          statusText.textContent = `Error: ${dlp.detail || "download failed"}`;
+          polling = false;
+        } else if (dlp.detail) {
+          statusText.textContent = dlp.detail;
+        }
+      }
+    } catch (err) {
+      statusText.textContent = `Error: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Re-download";
+    }
+  });
 
   // Save settings
   document.getElementById("saveSettingsBtn").addEventListener("click", async () => {
@@ -2962,6 +3033,8 @@ function initSettings() {
       hf_token: document.getElementById("hfTokenInput").value.trim(),
       translation_provider: document.getElementById("translationProvider")?.value || "ollama",
       ollama_url: document.getElementById("ollamaUrlInput")?.value.trim() || "http://localhost:11434",
+      ollama_model: document.getElementById("ollamaModelSelect")?.value || "",
+      hymt2_model_size: document.getElementById("hymt2ModelSize")?.value || "1.8B",
       anthropic_api_key: document.getElementById("claudeApiKeyInput")?.value.trim() || "",
     };
 
@@ -2999,8 +3072,66 @@ async function loadSavedSettings() {
     if (settings.anthropic_api_key) {
       document.getElementById("claudeApiKeyInput").value = settings.anthropic_api_key;
     }
+    if (settings.hymt2_model_size) {
+      const sizeEl = document.getElementById("hymt2ModelSize");
+      if (sizeEl) sizeEl.value = settings.hymt2_model_size;
+    }
+    // Populate Ollama models, then restore saved selection
+    await refreshOllamaModels(settings.ollama_model);
   } catch {
-    // Settings not available yet
+    // Settings not available yet — try populating Ollama models anyway
+    await refreshOllamaModels();
+  }
+}
+
+async function refreshOllamaModels(savedModel) {
+  const select = document.getElementById("ollamaModelSelect");
+  if (!select) return;
+
+  try {
+    const data = await fetchBackend("/ollama/status");
+    const models = data.models || [];
+    select.innerHTML = "";
+    if (models.length === 0) {
+      select.innerHTML = '<option value="">No models found</option>';
+      return;
+    }
+    models.forEach(name => {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      select.appendChild(opt);
+    });
+    if (savedModel && models.includes(savedModel)) {
+      select.value = savedModel;
+    } else {
+      select.value = models[0];
+    }
+  } catch {
+    select.innerHTML = '<option value="">Ollama not reachable</option>';
+  }
+}
+
+async function refreshHyMT2Status() {
+  const statusText = document.getElementById("hymt2StatusText");
+  const downloadBtn = document.getElementById("hymt2DownloadBtn");
+  if (!statusText || !downloadBtn) return;
+
+  const size = document.getElementById("hymt2ModelSize")?.value || "1.8B";
+  try {
+    const data = await fetchBackend(`/hymt2/status?model_size=${size}`);
+    if (data.downloaded) {
+      statusText.textContent = `✓ ${data.model_id} ready`;
+      statusText.style.color = "var(--accent)";
+      downloadBtn.textContent = "Re-download";
+    } else {
+      statusText.textContent = `Not downloaded — ${data.model_id}`;
+      statusText.style.color = "";
+      downloadBtn.textContent = "Download";
+    }
+  } catch {
+    statusText.textContent = "Status check failed";
+    statusText.style.color = "";
   }
 }
 
@@ -3008,16 +3139,28 @@ async function loadSavedSettings() {
 
 document.getElementById("progressCancelBtn").addEventListener("click", () => progressTracker.cancel());
 document.getElementById("autoCutBtn").addEventListener("click", runAutoCut);
-document.getElementById("transcribeBtn").addEventListener("click", () => runTranscribe(false));
+// Show transcribe mode dialog, then run with selected mode
+function showTranscribeModeDialog(resumeFromPlayhead = false) {
+  const dialog = document.getElementById("transcribeModeDialog");
+  document.getElementById("modeAudio").checked = true;
+  dialog.classList.remove("hidden");
+
+  document.getElementById("transcribeModeConfirm").onclick = () => {
+    dialog.classList.add("hidden");
+    const songMode = document.getElementById("modeSong").checked;
+    runTranscribe(resumeFromPlayhead, songMode);
+  };
+  document.getElementById("transcribeModeCancel").onclick = () => {
+    dialog.classList.add("hidden");
+  };
+}
+
+document.getElementById("transcribeBtn").addEventListener("click", () => showTranscribeModeDialog(false));
 // Right-click transcribe = resume from playhead
 document.getElementById("transcribeBtn").addEventListener("contextmenu", (e) => {
   e.preventDefault();
   const playheadTime = audioPlayback.audio ? audioPlayback.audio.currentTime : 0;
-  if (playheadTime > 1) {
-    runTranscribe(true);
-  } else {
-    runTranscribe(false);
-  }
+  showTranscribeModeDialog(playheadTime > 1);
 });
 document.getElementById("diarizeBtn").addEventListener("click", runDiarize);
 document.getElementById("previewBtn").addEventListener("click", previewCuts);
@@ -3267,9 +3410,9 @@ function initLiveTab() {
         for (let i = showUpTo; i >= 0; i--) {
           const seg = liveSegments[i];
           const trans = transData[i];
-          html += `<div class="live-text-line">${seg.text || ""}</div>`;
+          html += `<div class="live-text-line live-speech-text" data-seg-idx="${i}">${seg.text || ""}</div>`;
           if (trans) {
-            html += `<div class="live-text-line segment-translation">${trans}</div>`;
+            html += `<div class="live-text-line segment-translation live-trans-text" data-seg-idx="${i}">${trans}</div>`;
           } else {
             html += `<div class="live-text-line segment-translation translating">Translating...</div>`;
           }
@@ -3285,7 +3428,7 @@ function initLiveTab() {
 
           let transHtml = '';
           if (trans) {
-            transHtml = `<div class="segment-translation">${trans}</div>`;
+            transHtml = `<div class="segment-translation live-trans-text" data-seg-idx="${i}">${trans}</div>`;
           } else {
             transHtml = `<div class="segment-translation translating">Translating...</div>`;
           }
@@ -3294,7 +3437,7 @@ function initLiveTab() {
             <div class="segment-header">
               <span class="segment-time">${startFmt} → ${endFmt}</span>
             </div>
-            <div class="segment-text">${seg.text || ""}</div>
+            <div class="segment-text live-speech-text" data-seg-idx="${i}">${seg.text || ""}</div>
             ${transHtml}
           </div>`;
         }
@@ -3309,7 +3452,7 @@ function initLiveTab() {
           html += '<div class="live-text-line live-partial">' + livePartialText + '</div>';
         }
         for (let i = liveSegments.length - 1; i >= 0; i--) {
-          html += `<div class="live-text-line">${liveSegments[i].text || ""}</div>`;
+          html += `<div class="live-text-line live-speech-text" data-seg-idx="${i}">${liveSegments[i].text || ""}</div>`;
         }
         list.innerHTML = html;
       } else {
@@ -3330,7 +3473,7 @@ function initLiveTab() {
             <div class="segment-header">
               <span class="segment-time">${startFmt} → ${endFmt}</span>
             </div>
-            <div class="segment-text">${seg.text || ""}</div>
+            <div class="segment-text live-speech-text" data-seg-idx="${i}">${seg.text || ""}</div>
           </div>`;
         }
         list.innerHTML = html;
@@ -3945,17 +4088,198 @@ function initLiveTab() {
     });
   }
 
-  // ── Search toggle ──
+  // ── Live Search & Replace ──
+
+  let liveSearchMatches = [];
+  let liveSearchMatchIndex = -1;
+
+  function liveGetSearchTargets() {
+    if (liveFilter === "translation" && liveActiveTransLang) {
+      return document.querySelectorAll("#liveSegmentList .live-trans-text");
+    }
+    return document.querySelectorAll("#liveSegmentList .live-speech-text");
+  }
+
+  function liveClearHighlights() {
+    liveSearchMatches = [];
+    liveSearchMatchIndex = -1;
+    const countEl = document.getElementById("liveSearchCount");
+    if (countEl) countEl.textContent = "";
+    document.querySelectorAll("#liveSegmentList .search-highlight").forEach(el => {
+      el.replaceWith(document.createTextNode(el.textContent));
+      el.parentNode?.normalize();
+    });
+  }
+
+  function liveHighlightActive() {
+    document.querySelectorAll("#liveSegmentList .search-highlight.active")
+      .forEach(el => el.classList.remove("active"));
+    if (liveSearchMatchIndex < 0 || liveSearchMatchIndex >= liveSearchMatches.length) return;
+    const allMarks = document.querySelectorAll("#liveSegmentList .search-highlight");
+    if (allMarks[liveSearchMatchIndex]) {
+      allMarks[liveSearchMatchIndex].classList.add("active");
+      allMarks[liveSearchMatchIndex].scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
+  function liveUpdateCount() {
+    const countEl = document.getElementById("liveSearchCount");
+    if (!countEl) return;
+    const q = document.getElementById("liveSearchInput")?.value.trim();
+    countEl.textContent = liveSearchMatches.length === 0
+      ? (q ? "0" : "")
+      : `${liveSearchMatchIndex + 1}/${liveSearchMatches.length}`;
+  }
+
+  function liveRunSearch() {
+    const query = document.getElementById("liveSearchInput")?.value.trim();
+    liveClearHighlights();
+    if (!query) return;
+
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(`(${escaped})`, "gi");
+
+    liveGetSearchTargets().forEach(el => {
+      const text = el.textContent;
+      const hits = [...text.matchAll(new RegExp(escaped, "gi"))];
+      if (hits.length > 0) {
+        hits.forEach(m => liveSearchMatches.push({ el }));
+        el.innerHTML = text.replace(regex, '<mark class="search-highlight">$1</mark>');
+      }
+    });
+
+    if (liveSearchMatches.length > 0) {
+      liveSearchMatchIndex = 0;
+      liveHighlightActive();
+    }
+    liveUpdateCount();
+  }
+
+  function liveNavigateSearch(dir) {
+    if (liveSearchMatches.length === 0) return;
+    liveSearchMatchIndex = (liveSearchMatchIndex + dir + liveSearchMatches.length) % liveSearchMatches.length;
+    liveHighlightActive();
+    liveUpdateCount();
+  }
+
+  function liveReplaceCurrent() {
+    const query = document.getElementById("liveSearchInput")?.value.trim();
+    const replacement = document.getElementById("liveReplaceInput")?.value ?? "";
+    if (!query || liveSearchMatches.length === 0 || liveSearchMatchIndex < 0) return;
+
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(escaped, "i");
+    const match = liveSearchMatches[liveSearchMatchIndex];
+    const el = match.el;
+
+    if (liveFilter === "translation" && liveActiveTransLang) {
+      const idx = parseInt(el.dataset.segIdx ?? "-1");
+      if (idx >= 0 && liveTranslations[liveActiveTransLang]?.[idx]) {
+        liveTranslations[liveActiveTransLang][idx] =
+          liveTranslations[liveActiveTransLang][idx].replace(regex, replacement);
+      }
+    } else {
+      const idx = parseInt(el.dataset.segIdx ?? "-1");
+      if (idx >= 0 && liveSegments[idx]) {
+        liveSegments[idx].text = (liveSegments[idx].text || "").replace(regex, replacement);
+      }
+    }
+    renderLiveSegments();
+    liveRunSearch();
+  }
+
+  function liveReplaceAll() {
+    const query = document.getElementById("liveSearchInput")?.value.trim();
+    const replacement = document.getElementById("liveReplaceInput")?.value ?? "";
+    if (!query) return;
+
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(escaped, "gi");
+
+    if (liveFilter === "translation" && liveActiveTransLang) {
+      const transData = liveTranslations[liveActiveTransLang] || {};
+      Object.keys(transData).forEach(k => {
+        if (transData[k]) transData[k] = transData[k].replace(regex, replacement);
+      });
+    } else {
+      liveSegments.forEach(seg => {
+        if (seg.text) seg.text = seg.text.replace(regex, replacement);
+      });
+    }
+    renderLiveSegments();
+    liveRunSearch();
+  }
+
+  // ── Search toggle & button wiring ──
   const searchBtn = document.getElementById("liveSearchToggleBtn");
   const searchPanel = document.getElementById("liveSearchPanel");
   if (searchBtn && searchPanel) {
     searchBtn.addEventListener("click", () => {
+      const opening = searchPanel.classList.contains("hidden");
       searchPanel.classList.toggle("hidden");
-      if (!searchPanel.classList.contains("hidden")) {
-        document.getElementById("liveSearchInput").focus();
+      if (opening) {
+        document.getElementById("liveSearchInput")?.focus();
+      } else {
+        liveClearHighlights();
       }
     });
+
+    document.getElementById("liveSearchInput")?.addEventListener("input", liveRunSearch);
+    document.getElementById("liveSearchInput")?.addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); liveNavigateSearch(e.shiftKey ? -1 : 1); }
+      if (e.key === "Escape") { searchPanel.classList.add("hidden"); liveClearHighlights(); }
+    });
+    document.getElementById("liveSearchPrevBtn")?.addEventListener("click", () => liveNavigateSearch(-1));
+    document.getElementById("liveSearchNextBtn")?.addEventListener("click", () => liveNavigateSearch(1));
+    document.getElementById("liveReplaceOneBtn")?.addEventListener("click", liveReplaceCurrent);
+    document.getElementById("liveReplaceAllBtn")?.addEventListener("click", liveReplaceAll);
   }
+
+  // ── Live settings provider toggle ──
+  function updateLiveProviderUI(provider) {
+    document.getElementById("liveOllamaSettings")?.classList.toggle("hidden", provider !== "ollama");
+    document.getElementById("liveHymt2Settings")?.classList.toggle("hidden", provider !== "hymt2");
+    document.getElementById("liveClaudeKeyRow")?.classList.toggle("hidden", provider !== "claude");
+    if (provider === "hymt2") {
+      const size = document.getElementById("liveHymt2ModelSize")?.value || "1.8B";
+      fetchBackend(`/hymt2/status?model_size=${size}`).then(data => {
+        const el = document.getElementById("liveHymt2StatusText");
+        if (el) el.textContent = data.downloaded ? `✓ ${data.model_id} ready` : `Not downloaded — ${data.model_id}`;
+      }).catch(() => {});
+    }
+  }
+
+  const liveProviderSelect = document.getElementById("liveTransProvider");
+  if (liveProviderSelect) {
+    liveProviderSelect.addEventListener("change", () => updateLiveProviderUI(liveProviderSelect.value));
+    updateLiveProviderUI(liveProviderSelect.value);
+  }
+
+  document.getElementById("liveHymt2ModelSize")?.addEventListener("change", () => {
+    const size = document.getElementById("liveHymt2ModelSize")?.value || "1.8B";
+    fetchBackend(`/hymt2/status?model_size=${size}`).then(data => {
+      const el = document.getElementById("liveHymt2StatusText");
+      if (el) el.textContent = data.downloaded ? `✓ ${data.model_id} ready` : `Not downloaded — ${data.model_id}`;
+    }).catch(() => {});
+  });
+
+  // ── Live save settings ──
+  document.getElementById("liveSaveSettingsBtn")?.addEventListener("click", async () => {
+    const settings = {
+      translation_provider: document.getElementById("liveTransProvider")?.value || "ollama",
+      ollama_url: document.getElementById("liveOllamaUrlInput")?.value.trim() || "http://localhost:11434",
+      ollama_model: document.getElementById("liveOllamaModelSelect")?.value || "",
+      hymt2_model_size: document.getElementById("liveHymt2ModelSize")?.value || "1.8B",
+      anthropic_api_key: document.getElementById("liveClaudeApiKeyInput")?.value.trim() || "",
+    };
+    try {
+      await fetchBackend("/settings", { method: "POST", body: JSON.stringify(settings) });
+      const btn = document.getElementById("liveSaveSettingsBtn");
+      if (btn) { btn.textContent = "Saved!"; setTimeout(() => { btn.textContent = "Save Settings"; }, 1500); }
+    } catch (e) {
+      console.error("Save settings error:", e);
+    }
+  });
 }
 
 // ── Init ──

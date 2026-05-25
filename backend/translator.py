@@ -115,6 +115,123 @@ class OllamaTranslator:
             return {"available": False, "models": []}
 
 
+# ── Hy-MT2 Local Provider ──
+
+class HyMT2Translator:
+    """Offline translation using Tencent Hy-MT2 (tencent/Hy-MT2-1.8B or 7B)."""
+
+    MODELS = {
+        "1.8B": "tencent/Hy-MT2-1.8B",
+        "7B": "tencent/Hy-MT2-7B",
+    }
+    CACHE_DIR = os.path.join(os.path.expanduser("~"), ".easyscript", "models", "hymt2")
+
+    def __init__(self, model_size="1.8B"):
+        self.model_size = model_size if model_size in self.MODELS else "1.8B"
+        self.model_id = self.MODELS[self.model_size]
+        self._model = None
+        self._tokenizer = None
+        self._device = "cpu"
+
+    def _ensure_loaded(self):
+        if self._model is not None:
+            return
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+        except ImportError:
+            raise RuntimeError(
+                "transformers and torch are not installed. "
+                "Run: pip install transformers torch"
+            )
+
+        self._device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+        dtype = __import__("torch").float16 if self._device == "cuda" else __import__("torch").float32
+
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            self.model_id,
+            cache_dir=self.CACHE_DIR,
+            trust_remote_code=True,
+        )
+        self._model = AutoModelForCausalLM.from_pretrained(
+            self.model_id,
+            cache_dir=self.CACHE_DIR,
+            trust_remote_code=True,
+            torch_dtype=dtype,
+        ).to(self._device)
+        self._model.eval()
+
+    def _translate_one(self, text, source_lang, target_lang):
+        import torch
+        src = _lang_name(source_lang)
+        tgt = _lang_name(target_lang)
+        # Hy-MT2 chat-style prompt (instruction-following format)
+        messages = [
+            {"role": "system", "content": f"You are a professional translator. Translate the following text from {src} to {tgt}. Output only the translation, no explanations."},
+            {"role": "user", "content": text},
+        ]
+        # Use apply_chat_template if available, otherwise build manually
+        if hasattr(self._tokenizer, "apply_chat_template"):
+            prompt = self._tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        else:
+            prompt = f"Translate from {src} to {tgt}:\n{text}\nTranslation:"
+
+        inputs = self._tokenizer(prompt, return_tensors="pt").to(self._device)
+        with torch.no_grad():
+            outputs = self._model.generate(
+                **inputs,
+                max_new_tokens=512,
+                do_sample=False,
+                pad_token_id=self._tokenizer.eos_token_id,
+            )
+        new_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+        return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    def translate(self, segments, source_lang, target_lang,
+                  on_progress=None, on_batch_done=None):
+        self._ensure_loaded()
+        results = []
+        total = len(segments)
+
+        for i, seg in enumerate(segments):
+            text = seg.get("text", "").strip()
+            if text:
+                translated = self._translate_one(text, source_lang, target_lang)
+                results.append({"text": translated})
+            else:
+                results.append({"text": ""})
+
+            if on_progress:
+                on_progress((i + 1) / total)
+            if on_batch_done:
+                on_batch_done(list(results), i + 1)
+
+        return results
+
+    @classmethod
+    def is_downloaded(cls, model_size="1.8B"):
+        """Check if model weights exist in local cache."""
+        import glob
+        model_id = cls.MODELS.get(model_size, cls.MODELS["1.8B"])
+        folder = "models--" + model_id.replace("/", "--")
+        pattern = os.path.join(cls.CACHE_DIR, folder, "**", "*.safetensors")
+        return bool(glob.glob(pattern, recursive=True))
+
+    @classmethod
+    def download(cls, model_size="1.8B"):
+        """Download model from HuggingFace to local cache."""
+        from huggingface_hub import snapshot_download
+        model_id = cls.MODELS.get(model_size, cls.MODELS["1.8B"])
+        os.makedirs(cls.CACHE_DIR, exist_ok=True)
+        snapshot_download(
+            repo_id=model_id,
+            cache_dir=cls.CACHE_DIR,
+            ignore_patterns=["*.bin"],  # prefer safetensors
+        )
+
+
 # ── Claude API Provider ──
 
 class ClaudeTranslator:
@@ -269,6 +386,10 @@ def get_translator(provider="ollama", **kwargs):
         return ClaudeTranslator(
             api_key=kwargs.get("api_key"),
             model=kwargs.get("model"),
+        )
+    elif provider == "hymt2":
+        return HyMT2Translator(
+            model_size=kwargs.get("model_size", "1.8B"),
         )
     else:
         return OllamaTranslator(

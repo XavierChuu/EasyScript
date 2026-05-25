@@ -41,11 +41,83 @@ class Diarizer:
             )
 
         import torch
+
+        # ── PyTorch 2.6+ weights_only shim ──
+        # torch.load default changed to weights_only=True; pyannote checkpoints
+        # contain TorchVersion objects that need to be allowlisted.
+        try:
+            from torch.serialization import add_safe_globals
+            from torch.torch_version import TorchVersion
+            add_safe_globals([TorchVersion])
+        except Exception:
+            pass
+        _orig_torch_load = torch.load
+        def _patched_torch_load(*args, **kwargs):
+            kwargs['weights_only'] = False  # force, not setdefault
+            return _orig_torch_load(*args, **kwargs)
+        torch.load = _patched_torch_load
+        # Also patch in lightning_fabric/pytorch_lightning if already imported
+        for _mod_name in ('lightning_fabric.utilities.cloud_io',
+                          'pytorch_lightning.utilities.cloud_io'):
+            try:
+                import importlib
+                _mod = importlib.import_module(_mod_name)
+                if hasattr(_mod, 'pl_load'):
+                    _orig_pl = _mod.pl_load
+                    def _make_pl(orig):
+                        def _patched(*a, **k):
+                            k['weights_only'] = False
+                            return orig(*a, **k)
+                        return _patched
+                    _mod.pl_load = _make_pl(_orig_pl)
+            except Exception:
+                pass
+
+        # ── torchaudio 2.x compatibility shims ──
+        # torchaudio 2.x removed the legacy I/O API that pyannote 3.x expects.
+        import torchaudio
+        if not hasattr(torchaudio, 'AudioMetaData'):
+            from collections import namedtuple
+            torchaudio.AudioMetaData = namedtuple(
+                'AudioMetaData',
+                ['sample_rate', 'num_frames', 'num_channels', 'bits_per_sample', 'encoding'],
+            )
+        if not hasattr(torchaudio, 'list_audio_backends'):
+            torchaudio.list_audio_backends = lambda: ['soundfile']
+        if not hasattr(torchaudio, 'info'):
+            import soundfile as _sf
+            def _torchaudio_info(path, backend=None, format=None):
+                i = _sf.info(str(path))
+                bps = 16
+                try:
+                    bps = int(i.subtype.split('_')[-1])
+                except Exception:
+                    pass
+                return torchaudio.AudioMetaData(
+                    sample_rate=i.samplerate, num_frames=i.frames,
+                    num_channels=i.channels, bits_per_sample=bps, encoding=i.subtype,
+                )
+            torchaudio.info = _torchaudio_info
+
+        # ── huggingface_hub 1.x compatibility shim ──
+        # huggingface_hub 1.0+ renamed use_auth_token → token.
+        # pyannote 3.x still passes use_auth_token internally.
+        import huggingface_hub as _hfhub
+        for _fn_name in ('hf_hub_download', 'snapshot_download'):
+            _orig = getattr(_hfhub, _fn_name)
+            def _make_patched(orig):
+                def _patched(*args, **kwargs):
+                    if 'use_auth_token' in kwargs:
+                        kwargs['token'] = kwargs.pop('use_auth_token')
+                    return orig(*args, **kwargs)
+                return _patched
+            setattr(_hfhub, _fn_name, _make_patched(_orig))
+
         from pyannote.audio import Pipeline
 
         self.pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            token=self.hf_token,
+            use_auth_token=self.hf_token,
         )
 
         # Use GPU when available (CUDA or MPS)
@@ -86,8 +158,16 @@ class Diarizer:
             if on_progress:
                 on_progress(0.12)
 
-            # Run diarization on the clean WAV
-            diarization_output = self.pipeline(tmp_wav)
+            # Use soundfile to bypass torchaudio/torchcodec on Windows
+            import soundfile as sf
+            import numpy as np
+            import torch
+            audio_data, sample_rate = sf.read(tmp_wav, dtype="float32")
+            if audio_data.ndim == 1:
+                waveform = torch.from_numpy(audio_data).unsqueeze(0)
+            else:
+                waveform = torch.from_numpy(audio_data.T)
+            diarization_output = self.pipeline({"waveform": waveform, "sample_rate": sample_rate})
 
         finally:
             if tmp_wav and os.path.exists(tmp_wav):

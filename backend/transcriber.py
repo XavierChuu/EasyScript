@@ -3,6 +3,22 @@ import tempfile
 import platform
 import os
 
+# Add NVIDIA CUDA/cuDNN DLL directories on Windows if installed via pip packages
+if platform.system() == "Windows":
+    import site
+    from pathlib import Path
+    for sd in site.getsitepackages():
+        nvidia_path = Path(sd) / "nvidia"
+        if nvidia_path.exists():
+            for sub in nvidia_path.iterdir():
+                bin_dir = sub / "bin"
+                if bin_dir.exists():
+                    try:
+                        os.add_dll_directory(str(bin_dir))
+                    except Exception:
+                        pass
+
+
 
 # ── Model repo mappings for mlx-whisper (HuggingFace MLX community) ──
 MLX_MODEL_REPOS = {
@@ -101,6 +117,11 @@ def _get_nvidia_gpu_name():
         return "NVIDIA GPU"
 
 
+def _is_hallucination(text):
+    """No-op: blacklist filtering removed — rely on probability thresholds only."""
+    return False
+
+
 class Transcriber:
     CHUNK_DURATION = 600  # 10 minutes per chunk
     OVERLAP = 5.0  # 5s overlap to avoid cutting words at boundaries
@@ -147,7 +168,7 @@ class Transcriber:
     # ── Public API ──
 
     def transcribe(self, audio_path, language=None, on_progress=None,
-                   start_from=0.0, on_chunk_done=None):
+                   start_from=0.0, on_chunk_done=None, song_mode=False):
         """Transcribe audio with chunked processing for long files."""
         duration = self._get_duration(audio_path) or 0
         if duration <= 0:
@@ -163,11 +184,11 @@ class Transcriber:
             if start_from > 0:
                 return self._transcribe_range(
                     audio_path, start_from, duration, duration,
-                    language, on_progress, on_chunk_done
+                    language, on_progress, on_chunk_done, song_mode
                 )
             else:
                 return self._transcribe_single(
-                    audio_path, language, on_progress, on_chunk_done
+                    audio_path, language, on_progress, on_chunk_done, song_mode
                 )
 
         # Long files: split into 10-min chunks with overlap
@@ -196,6 +217,7 @@ class Transcriber:
                 language,
                 on_progress=make_chunk_progress(i),
                 on_chunk_done=None,
+                song_mode=song_mode,
             )
 
             for seg in chunk_segments:
@@ -213,19 +235,19 @@ class Transcriber:
 
     # ── Backend-specific transcription ──
 
-    def _transcribe_single(self, audio_path, language, on_progress, on_chunk_done):
+    def _transcribe_single(self, audio_path, language, on_progress, on_chunk_done, song_mode=False):
         """Transcribe entire file (short files, no extraction)."""
         if self.backend == "mlx":
-            results = self._mlx_transcribe(audio_path, language, 0, on_progress)
+            results = self._mlx_transcribe(audio_path, language, 0, on_progress, song_mode)
         else:
-            results = self._fw_transcribe(audio_path, language, 0, on_progress)
+            results = self._fw_transcribe(audio_path, language, 0, on_progress, song_mode)
 
         if on_chunk_done:
             on_chunk_done(results, 1, 1)
         return results
 
     def _transcribe_range(self, audio_path, start_sec, end_sec, total_duration,
-                          language, on_progress, on_chunk_done):
+                          language, on_progress, on_chunk_done, song_mode=False):
         """Extract time range via ffmpeg, then transcribe."""
         chunk_duration = end_sec - start_sec
         tmp_path = None
@@ -245,9 +267,9 @@ class Transcriber:
             subprocess.run(cmd, capture_output=True, timeout=60)
 
             if self.backend == "mlx":
-                results = self._mlx_transcribe(tmp_path, language, start_sec, on_progress)
+                results = self._mlx_transcribe(tmp_path, language, start_sec, on_progress, song_mode)
             else:
-                results = self._fw_transcribe(tmp_path, language, start_sec, on_progress)
+                results = self._fw_transcribe(tmp_path, language, start_sec, on_progress, song_mode)
 
             if on_chunk_done:
                 on_chunk_done(results, 1, 1)
@@ -262,7 +284,7 @@ class Transcriber:
 
     # ── mlx-whisper backend (Apple Metal GPU) ──
 
-    def _mlx_transcribe(self, audio_path, language, time_offset, on_progress):
+    def _mlx_transcribe(self, audio_path, language, time_offset, on_progress, song_mode=False):
         """Transcribe using mlx-whisper on Metal GPU."""
         import mlx_whisper
 
@@ -273,6 +295,13 @@ class Transcriber:
         }
         if language:
             opts["language"] = language
+        if song_mode:
+            if language == "vi":
+                opts["initial_prompt"] = "Lời bài hát tiếng Việt:"
+                opts["no_speech_threshold"] = 0.15
+            else:
+                opts["initial_prompt"] = "Song lyrics:"
+                opts["no_speech_threshold"] = 0.25
 
         result = mlx_whisper.transcribe(audio_path, **opts)
 
@@ -282,6 +311,12 @@ class Transcriber:
 
         results = []
         for seg in segments_raw:
+            text = seg.get("text", "").strip()
+            if not text or _is_hallucination(text):
+                if on_progress and duration > 0:
+                    on_progress(min(seg["end"] / duration, 1.0))
+                continue
+
             words = []
             for w in seg.get("words", []):
                 words.append({
@@ -294,7 +329,7 @@ class Transcriber:
             results.append({
                 "start": round(time_offset + seg["start"], 3),
                 "end": round(time_offset + seg["end"], 3),
-                "text": seg.get("text", "").strip(),
+                "text": text,
                 "language": detected_lang,
                 "words": words,
             })
@@ -306,27 +341,66 @@ class Transcriber:
 
     # ── faster-whisper backend (CUDA / CPU) ──
 
-    def _fw_transcribe(self, audio_path, language, time_offset, on_progress):
-        """Transcribe using faster-whisper (CTranslate2)."""
-        segments_iter, info = self.model.transcribe(
-            audio_path,
+    def _fw_transcribe(self, audio_path, language, time_offset, on_progress, song_mode=False):
+        """Transcribe using faster-whisper (CTranslate2).
+
+        For song_mode, audio is assumed to already be vocal-isolated (e.g. by
+        Demucs); we therefore use near-default speech parameters with only a
+        mild VAD relaxation to handle longer pauses in song phrasing.
+        """
+        fw_opts = dict(
             language=language,
             beam_size=1,
             word_timestamps=True,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
             condition_on_previous_text=False,
         )
+        if song_mode:
+            # Isolated vocals often have longer gaps between phrases than speech
+            fw_opts["vad_parameters"] = {
+                "threshold": 0.4,
+                "min_silence_duration_ms": 700,
+            }
+            fw_opts["no_speech_threshold"] = 0.4
+            if language == "vi":
+                fw_opts["initial_prompt"] = "Đây là lời bài hát tiếng Việt."
+            else:
+                fw_opts["initial_prompt"] = "Song lyrics."
+        else:
+            fw_opts["vad_parameters"] = {"min_silence_duration_ms": 300}
+        segments_iter, info = self.model.transcribe(audio_path, **fw_opts)
 
         detected_lang = info.language
         duration = info.duration or 1
         results = []
 
         for seg in segments_iter:
+            # Skip hallucinated segments: silence/noise that Whisper fills with
+            # training-data phrases (e.g. YouTube subscribe prompts in Vietnamese).
+            # Song mode uses looser thresholds because singing legitimately has
+            # lower confidence than spoken speech.
+            no_speech = getattr(seg, 'no_speech_prob', 0.0)
+            avg_logprob = getattr(seg, 'avg_logprob', 0.0)
+            if song_mode:
+                # Isolated vocals: mild filter (avoid pure-noise segments)
+                hallucinated = no_speech > 0.8 or avg_logprob < -1.5
+            else:
+                hallucinated = no_speech > 0.6 or avg_logprob < -1.0
+            if hallucinated:
+                if on_progress and duration > 0:
+                    on_progress(min(seg.end / duration, 1.0))
+                continue
+
+            text = seg.text.strip()
+            if not text or _is_hallucination(text):
+                if on_progress and duration > 0:
+                    on_progress(min(seg.end / duration, 1.0))
+                continue
+
             results.append({
                 "start": round(time_offset + seg.start, 3),
                 "end": round(time_offset + seg.end, 3),
-                "text": seg.text.strip(),
+                "text": text,
                 "language": detected_lang,
                 "words": [
                     {

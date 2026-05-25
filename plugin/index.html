@@ -82,6 +82,44 @@
               <option value="en">English</option>
               <option value="zh">Chinese</option>
               <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="es">Spanish</option>
+              <option value="pt">Portuguese</option>
+              <option value="it">Italian</option>
+              <option value="ru">Russian</option>
+              <option value="th">Thai</option>
+              <option value="id">Indonesian</option>
+              <option value="ms">Malay</option>
+              <option value="tl">Filipino</option>
+              <option value="hi">Hindi</option>
+              <option value="bn">Bengali</option>
+              <option value="ar">Arabic</option>
+              <option value="he">Hebrew</option>
+              <option value="fa">Persian</option>
+              <option value="tr">Turkish</option>
+              <option value="nl">Dutch</option>
+              <option value="pl">Polish</option>
+              <option value="uk">Ukrainian</option>
+              <option value="cs">Czech</option>
+              <option value="sv">Swedish</option>
+              <option value="da">Danish</option>
+              <option value="fi">Finnish</option>
+              <option value="no">Norwegian</option>
+              <option value="el">Greek</option>
+              <option value="hu">Hungarian</option>
+              <option value="ro">Romanian</option>
+              <option value="bg">Bulgarian</option>
+              <option value="hr">Croatian</option>
+              <option value="sk">Slovak</option>
+              <option value="ca">Catalan</option>
+              <option value="ta">Tamil</option>
+              <option value="te">Telugu</option>
+              <option value="ur">Urdu</option>
+              <option value="km">Khmer</option>
+              <option value="lo">Lao</option>
+              <option value="my">Burmese</option>
             </select>
           </div>
         </div>
@@ -310,14 +348,40 @@
           <label class="control-label">Translation</label>
           <select class="input-select" id="translationProvider" style="flex:1">
             <option value="ollama">Ollama (Local)</option>
+            <option value="hymt2">Hy-MT2 (Local)</option>
             <option value="claude">Claude API (Cloud)</option>
           </select>
         </div>
-        <div class="control-row mt-6" id="ollamaUrlRow">
-          <label class="control-label">Ollama URL</label>
-          <input type="text" class="input-text" id="ollamaUrlInput" placeholder="http://localhost:11434" value="http://localhost:11434" style="flex:1" />
+        <!-- Ollama settings -->
+        <div id="ollamaSettings">
+          <div class="control-row mt-6" id="ollamaUrlRow">
+            <label class="control-label">Ollama URL</label>
+            <input type="text" class="input-text" id="ollamaUrlInput" placeholder="http://localhost:11434" value="http://localhost:11434" style="flex:1" />
+          </div>
+          <div class="control-row mt-6" id="ollamaModelRow">
+            <label class="control-label">Model</label>
+            <select class="input-select" id="ollamaModelSelect" style="flex:1">
+              <option value="">Loading models...</option>
+            </select>
+            <button class="btn btn-xs" id="refreshOllamaModelsBtn" title="Refresh" style="margin-left:4px">↻</button>
+          </div>
         </div>
-        <div class="control-row mt-6" id="claudeKeyRow">
+        <!-- Hy-MT2 settings -->
+        <div id="hymt2Settings" class="hidden">
+          <div class="control-row mt-6">
+            <label class="control-label">Model size</label>
+            <select class="input-select" id="hymt2ModelSize" style="flex:1">
+              <option value="1.8B">1.8B — fast (~3GB VRAM)</option>
+              <option value="7B">7B — more accurate (~14GB VRAM)</option>
+            </select>
+          </div>
+          <div class="control-row mt-6" id="hymt2StatusRow">
+            <span class="settings-hint" id="hymt2StatusText">Not downloaded</span>
+            <button class="btn btn-xs btn-primary" id="hymt2DownloadBtn" style="margin-left:auto">Download</button>
+          </div>
+        </div>
+        <!-- Claude settings -->
+        <div class="control-row mt-6 hidden" id="claudeKeyRow">
           <label class="control-label">API Key</label>
           <input type="password" class="input-text" id="claudeApiKeyInput" placeholder="sk-ant-..." style="flex:1" />
         </div>
@@ -381,6 +445,44 @@
                   <option value="en">English</option>
                   <option value="zh">Chinese</option>
                   <option value="ja">Japanese</option>
+                  <option value="ko">Korean</option>
+                  <option value="fr">French</option>
+                  <option value="de">German</option>
+                  <option value="es">Spanish</option>
+                  <option value="pt">Portuguese</option>
+                  <option value="it">Italian</option>
+                  <option value="ru">Russian</option>
+                  <option value="th">Thai</option>
+                  <option value="id">Indonesian</option>
+                  <option value="ms">Malay</option>
+                  <option value="tl">Filipino</option>
+                  <option value="hi">Hindi</option>
+                  <option value="bn">Bengali</option>
+                  <option value="ar">Arabic</option>
+                  <option value="he">Hebrew</option>
+                  <option value="fa">Persian</option>
+                  <option value="tr">Turkish</option>
+                  <option value="nl">Dutch</option>
+                  <option value="pl">Polish</option>
+                  <option value="uk">Ukrainian</option>
+                  <option value="cs">Czech</option>
+                  <option value="sv">Swedish</option>
+                  <option value="da">Danish</option>
+                  <option value="fi">Finnish</option>
+                  <option value="no">Norwegian</option>
+                  <option value="el">Greek</option>
+                  <option value="hu">Hungarian</option>
+                  <option value="ro">Romanian</option>
+                  <option value="bg">Bulgarian</option>
+                  <option value="hr">Croatian</option>
+                  <option value="sk">Slovak</option>
+                  <option value="ca">Catalan</option>
+                  <option value="ta">Tamil</option>
+                  <option value="te">Telugu</option>
+                  <option value="ur">Urdu</option>
+                  <option value="km">Khmer</option>
+                  <option value="lo">Lao</option>
+                  <option value="my">Burmese</option>
                 </select>
               </div>
             </div>
@@ -495,14 +597,38 @@
           <label class="control-label">Translation</label>
           <select class="input-select" id="liveTransProvider" style="flex:1">
             <option value="ollama">Ollama (Local)</option>
+            <option value="hymt2">Hy-MT2 (Local)</option>
             <option value="claude">Claude API (Cloud)</option>
           </select>
         </div>
-        <div class="control-row mt-6" id="liveOllamaUrlRow">
-          <label class="control-label">Ollama URL</label>
-          <input type="text" class="input-text" id="liveOllamaUrlInput" placeholder="http://localhost:11434" value="http://localhost:11434" style="flex:1" />
+        <!-- Live Ollama settings -->
+        <div id="liveOllamaSettings">
+          <div class="control-row mt-6" id="liveOllamaUrlRow">
+            <label class="control-label">Ollama URL</label>
+            <input type="text" class="input-text" id="liveOllamaUrlInput" placeholder="http://localhost:11434" value="http://localhost:11434" style="flex:1" />
+          </div>
+          <div class="control-row mt-6" id="liveOllamaModelRow">
+            <label class="control-label">Model</label>
+            <select class="input-select" id="liveOllamaModelSelect" style="flex:1">
+              <option value="">Loading models...</option>
+            </select>
+          </div>
         </div>
-        <div class="control-row mt-6" id="liveClaudeKeyRow">
+        <!-- Live Hy-MT2 settings -->
+        <div id="liveHymt2Settings" class="hidden">
+          <div class="control-row mt-6">
+            <label class="control-label">Model size</label>
+            <select class="input-select" id="liveHymt2ModelSize" style="flex:1">
+              <option value="1.8B">1.8B — fast (~3GB VRAM)</option>
+              <option value="7B">7B — more accurate (~14GB VRAM)</option>
+            </select>
+          </div>
+          <div class="control-row mt-6">
+            <span class="settings-hint" id="liveHymt2StatusText">Not downloaded</span>
+          </div>
+        </div>
+        <!-- Live Claude settings -->
+        <div class="control-row mt-6 hidden" id="liveClaudeKeyRow">
           <label class="control-label">API Key</label>
           <input type="password" class="input-text" id="liveClaudeApiKeyInput" placeholder="sk-ant-..." style="flex:1" />
         </div>
@@ -533,6 +659,31 @@
       <div class="btn-row mt-8">
         <button class="btn" id="exportDialogCancel">Cancel</button>
         <button class="btn btn-primary" id="exportDialogConfirm">Export</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transcribe Mode Dialog -->
+  <div class="modal-overlay hidden" id="transcribeModeDialog">
+    <div class="modal-content">
+      <div class="modal-title">Transcription Mode</div>
+      <label class="modal-option">
+        <input type="radio" name="transcribeMode" value="audio" id="modeAudio" checked />
+        <div class="modal-option-body">
+          <strong>Audio / Speech</strong>
+          <span class="modal-option-desc">Interviews, podcasts, voice recordings</span>
+        </div>
+      </label>
+      <label class="modal-option">
+        <input type="radio" name="transcribeMode" value="song" id="modeSong" />
+        <div class="modal-option-body">
+          <strong>Music / Song</strong>
+          <span class="modal-option-desc">Isolates vocals from music with Demucs, then transcribes the clean vocal track (+30-90s).</span>
+        </div>
+      </label>
+      <div class="btn-row mt-8">
+        <button class="btn" id="transcribeModeCancel">Cancel</button>
+        <button class="btn btn-primary" id="transcribeModeConfirm">Start Transcription</button>
       </div>
     </div>
   </div>

@@ -1679,15 +1679,42 @@ body {
   cursor: pointer;
 }
 
-.modal-option input[type="checkbox"] {
+.modal-option input[type="checkbox"],
+.modal-option input[type="radio"] {
   width: 14px;
   height: 14px;
   accent-color: var(--accent);
   cursor: pointer;
+  flex-shrink: 0;
 }
 
-.modal-option input[type="checkbox"]:disabled {
+.modal-option input[type="checkbox"]:disabled,
+.modal-option input[type="radio"]:disabled {
   opacity: 0.35;
+}
+
+.modal-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.modal-option-body strong {
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.modal-option-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+
+.modal-hint code {
+  background: var(--bg-tertiary);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 9px;
 }
 
 .modal-sub-options {

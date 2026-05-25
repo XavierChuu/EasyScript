@@ -26,3 +26,11 @@ easyscript_uploads/
 
 # Logs
 *.log
+
+# Claude Code session data
+.claude/
+
+# Local settings (may contain API keys / HF tokens)
+.easyscript/
+settings.json
+.env
