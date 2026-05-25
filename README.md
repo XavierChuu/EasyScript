@@ -94,8 +94,9 @@ Download `EasyScript.app` from [Releases](https://github.com/XavierChuu/EasyScri
 
 **Requirements:**
 - Python 3.11+
-- FFmpeg (`brew install ffmpeg`)
 - macOS 13+ (for Apple Silicon MLX) or Windows with NVIDIA GPU
+- FFmpeg is **bundled** in the .app (no installation needed for end users)
+- For source build: build script auto-downloads static ffmpeg/ffprobe
 
 ```bash
 # Clone repository
@@ -263,8 +264,8 @@ The backend exposes a REST API at `http://localhost:9876`:
 - **macOS:** 13.0+ (Ventura or later), Apple Silicon recommended
 - **Windows:** Windows 10+, NVIDIA GPU recommended
 - **RAM:** 8GB minimum, 16GB recommended for large models
-- **Storage:** ~1GB for app + model storage (varies by model size)
-- **FFmpeg:** Required (bundled in standalone app)
+- **Storage:** ~1.1GB for app + model storage (varies by model size)
+- **FFmpeg:** Bundled inside the standalone app — no separate install needed
 
 ---
 

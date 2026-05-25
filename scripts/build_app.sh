@@ -17,7 +17,26 @@ fi
 echo "Installing dependencies..."
 source venv/bin/activate
 pip install -r requirements.txt
-pip install pywebview pyinstaller
+pip install pywebview pyinstaller demucs soundfile
+
+# Download static ffmpeg/ffprobe for bundling (so users don't need to install)
+mkdir -p "$BACKEND_DIR/bin"
+if [ "$(uname)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+  if [ ! -f "$BACKEND_DIR/bin/ffmpeg" ]; then
+    echo "Downloading static ffmpeg (macOS arm64)..."
+    curl -L --max-time 120 -o /tmp/ffmpeg.zip "https://www.osxexperts.net/ffmpeg711arm.zip"
+    unzip -o /tmp/ffmpeg.zip -d "$BACKEND_DIR/bin/" && rm /tmp/ffmpeg.zip
+    rm -rf "$BACKEND_DIR/bin/__MACOSX"
+    chmod +x "$BACKEND_DIR/bin/ffmpeg"
+  fi
+  if [ ! -f "$BACKEND_DIR/bin/ffprobe" ]; then
+    echo "Downloading static ffprobe (macOS arm64)..."
+    curl -L --max-time 120 -o /tmp/ffprobe.zip "https://www.osxexperts.net/ffprobe711arm.zip"
+    unzip -o /tmp/ffprobe.zip -d "$BACKEND_DIR/bin/" && rm /tmp/ffprobe.zip
+    rm -rf "$BACKEND_DIR/bin/__MACOSX"
+    chmod +x "$BACKEND_DIR/bin/ffprobe"
+  fi
+fi
 
 echo ""
 echo "Building app with PyInstaller..."

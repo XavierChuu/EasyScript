@@ -2,6 +2,9 @@
 dist/
 backend/build/
 
+# Bundled binaries (ffmpeg/ffprobe — too large; downloaded by build script)
+backend/bin/
+
 # Python
 backend/venv/
 __pycache__/

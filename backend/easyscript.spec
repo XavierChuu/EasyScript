@@ -40,6 +40,31 @@ for f in ["index.html", "index.js", "styles.css"]:
     if os.path.isfile(src):
         plugin_files.append((src, "plugin"))
 
+# Bundled ffmpeg/ffprobe binaries (so users don't need to install separately)
+ffmpeg_binaries = []
+_bin_dir = os.path.join(os.path.dirname(os.path.abspath(SPEC)), "bin")
+for _bn in ("ffmpeg", "ffprobe"):
+    _bp = os.path.join(_bin_dir, _bn)
+    if os.path.isfile(_bp):
+        # Put in "bin" subfolder of the bundle
+        ffmpeg_binaries.append((_bp, "bin"))
+
+# Demucs data (song mode — vocal separation)
+demucs_data = []
+demucs_submodules = []
+try:
+    demucs_data += collect_data_files("demucs")
+    demucs_submodules += collect_submodules("demucs")
+except Exception:
+    pass
+
+# Transformers data (Hy-MT2 translator)
+transformers_data = []
+try:
+    transformers_data += collect_data_files("transformers")
+except Exception:
+    pass
+
 # MLX data + binaries (Apple Silicon only)
 mlx_data = []
 mlx_binaries = []
@@ -59,13 +84,14 @@ if platform.system() == "Darwin" and platform.machine() == "arm64":
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=mlx_binaries + torchcodec_binaries,
-    datas=faster_whisper_data + ctranslate2_data + scipy_data + pyannote_data + speechbrain_data + torchcodec_data + mlx_data + plugin_files + [
+    binaries=mlx_binaries + torchcodec_binaries + ffmpeg_binaries,
+    datas=faster_whisper_data + ctranslate2_data + scipy_data + pyannote_data + speechbrain_data + torchcodec_data + mlx_data + demucs_data + transformers_data + plugin_files + [
         ("server.py", "."),
         ("transcriber.py", "."),
         ("silence_detector.py", "."),
         ("diarizer.py", "."),
         ("translator.py", "."),
+        ("_demucs_runner.py", "."),
     ],
     hiddenimports=[
         # uvicorn internals
@@ -129,8 +155,19 @@ a = Analysis(
         "mlx",
         "mlx.core",
         "mlx_whisper",
+        # Demucs (song mode — vocal separation)
+        "demucs",
+        "demucs.api",
+        "demucs.pretrained",
+        "soundfile",
+        # Transformers (Hy-MT2 translator)
+        "transformers",
+        "huggingface_hub",
+        "sentencepiece",
+        "tokenizers",
     ]
     + mlx_submodules
+    + demucs_submodules
     + collect_submodules("faster_whisper")
     + collect_submodules("ctranslate2")
     + collect_submodules("scipy")

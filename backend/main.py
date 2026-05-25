@@ -111,7 +111,23 @@ def main():
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     # Ensure ffmpeg/ffprobe are findable — PyInstaller bundles strip PATH
-    extra_paths = [
+    # Priority: bundled bin/ → homebrew → system
+    bundled_bin = None
+    if getattr(sys, '_MEIPASS', None):
+        # In PyInstaller bundle: bin/ is alongside the main resources
+        candidate = os.path.join(sys._MEIPASS, "bin")
+        if os.path.isdir(candidate):
+            bundled_bin = candidate
+    if not bundled_bin:
+        # Dev mode: backend/bin/
+        candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+        if os.path.isdir(candidate):
+            bundled_bin = candidate
+
+    extra_paths = []
+    if bundled_bin:
+        extra_paths.append(bundled_bin)
+    extra_paths += [
         "/opt/homebrew/bin",
         "/usr/local/bin",
         "/usr/bin",
@@ -123,6 +139,16 @@ def main():
         if os.path.isdir(p) and p not in current_path:
             current_path = p + ":" + current_path
     os.environ["PATH"] = current_path
+
+    # Ensure bundled ffmpeg has exec permissions (PyInstaller may not preserve)
+    if bundled_bin:
+        for binname in ("ffmpeg", "ffprobe"):
+            bp = os.path.join(bundled_bin, binname)
+            if os.path.isfile(bp):
+                try:
+                    os.chmod(bp, 0o755)
+                except OSError:
+                    pass
 
     # Log ffmpeg status for debugging
     import shutil
