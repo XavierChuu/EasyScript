@@ -8,38 +8,46 @@ Built for macOS (Apple Silicon optimized with Metal GPU acceleration) and Window
 
 ## Screenshots
 
+> **v1.2.0** — Redesigned interface (Vapi midnight console), auto-waveform on file select, and song-mode tuning sliders.
+
 ### Editor Mode — Main Interface
-Load audio files, detect silence, transcribe speech, and identify speakers — all from a clean, intuitive interface with waveform visualization.
+Pick an audio/video file and you're ready to go: action buttons (Detect Silence · Transcribe · Speakers), model + language pickers, an interactive waveform, segments list, and export controls — all in a single compact panel. CUDA / device status is shown next to the model tag.
 
 ![Editor Mode Overview](docs/images/01-editor-overview.png)
 
-### Waveform & Speaker Diarization
-Interactive waveform viewer with color-coded speech/silence/breath segments. After running speaker diarization, each segment is labeled with the identified speaker (Speaker A, B, C...) in distinct colors.
+### Waveform & Cut Detection
+After loading an audio file the waveform appears immediately, so Transcribe or Speakers can run **without** clicking Detect Silence first. Open the cut-settings panel to fine-tune padding, minimum silence and silence threshold; preview the resulting cuts on the waveform with the SPEECH / SILENCE / BREATH / CUT legend.
 
-![Waveform with Speakers](docs/images/02-editor-waveform-speakers.png)
+![Waveform & Cut Detection](docs/images/02-editor-waveform-cuts.png)
 
-### Speech Segments with Speaker Labels
-Transcribed segments are displayed with speaker identification, timecodes, and the transcribed text. Filter by All, Speech, Silence, or Translation tabs.
+### Music / Song — Tunable Lyric Recognition
+Choosing **Music / Song** in the transcribe dialog reveals three sliders that let you steer how Whisper handles isolated vocals:
 
-![Segments with Speaker Labels](docs/images/03-segments-speaker-labels.png)
+- **Vocal sensitivity** — lower catches whispered / falsetto vocals, higher rejects background music
+- **Phrase gap** — minimum silence (ms) between lyric phrases
+- **Decode quality** — beam search width 1 → 5 (slower but more coherent lyrics)
 
-### Display Mode Settings
-Choose how text is displayed: Natural sentences, Word by word, By punctuation, or Max words per line — flexible formatting for different use cases.
+Vocals are first isolated with Demucs, then Whisper transcribes the clean vocal track with your chosen settings.
 
-![Display Modes](docs/images/04-display-modes.png)
+![Music / Song tuning sliders](docs/images/03-song-mode-tuning.png)
 
-### Translation — Language Selection
-Translate transcriptions into 30+ languages. Click "+" to add a target language from the language picker with support for Vietnamese, Chinese, Japanese, Korean, Thai, and many more.
+### Segments with Speaker Labels & Bilingual Text
+Each segment shows a colored speaker pill (Speaker A, B, C…), a monospace timecode, the original line, and the translation below. Click a segment to jump the playhead; click the speaker pill to rename them.
+
+![Segments with Speaker Labels](docs/images/04-segments-speaker-labels.png)
+
+### Translation — Language Picker
+Add a target language from a flat grid covering 40+ languages. The source language and already-added languages are dimmed. Languages stick as pill-tabs, switchable in one click.
 
 ![Translation Languages](docs/images/05-translation-languages.png)
 
-### Translation — Text View
-View translations in a continuous text format. Add multiple target languages (e.g., Vietnamese + Japanese) with tabs to switch between them.
+### Translation — Multi-language Bilingual View
+Run multiple translations in parallel (Vietnamese, Chinese, Japanese, …) and switch between them with pill-tabs. Each segment shows the original line in italic above the translation, with the speaker label still attached.
 
-![Translation Text View](docs/images/06-translation-text-view.png)
+![Translation Bilingual View](docs/images/06-translation-bilingual.png)
 
 ### Live Mode — Real-time Transcription
-Record from your microphone and get real-time transcription with sentence-level splitting. Choose the Turbo model for fast Vietnamese transcription, or any other model for your language.
+Record from microphone or system audio and watch lines appear as you speak. The currently-streaming partial line is highlighted in cyan with a `● live` tag; finalized segments stack below with timecodes. Pause / Stop control the session without losing what's already been captured.
 
 ![Live Mode](docs/images/07-live-mode.png)
 
