@@ -222,8 +222,14 @@ class Transcriber:
     # ── Public API ──
 
     def transcribe(self, audio_path, language=None, on_progress=None,
-                   start_from=0.0, on_chunk_done=None, song_mode=False):
+                   start_from=0.0, on_chunk_done=None, song_mode=False,
+                   song_vad_threshold=None, song_min_silence_ms=None, song_beam_size=None):
         """Transcribe audio with chunked processing for long files."""
+        song_opts = {
+            "vad_threshold": song_vad_threshold,
+            "min_silence_ms": song_min_silence_ms,
+            "beam_size": song_beam_size,
+        }
         duration = self._get_duration(audio_path) or 0
         if duration <= 0:
             if on_progress:
@@ -238,11 +244,11 @@ class Transcriber:
             if start_from > 0:
                 return self._transcribe_range(
                     audio_path, start_from, duration, duration,
-                    language, on_progress, on_chunk_done, song_mode
+                    language, on_progress, on_chunk_done, song_mode, song_opts
                 )
             else:
                 return self._transcribe_single(
-                    audio_path, language, on_progress, on_chunk_done, song_mode
+                    audio_path, language, on_progress, on_chunk_done, song_mode, song_opts
                 )
 
         # Long files: split into 10-min chunks with overlap
@@ -272,6 +278,7 @@ class Transcriber:
                 on_progress=make_chunk_progress(i),
                 on_chunk_done=None,
                 song_mode=song_mode,
+                song_opts=song_opts,
             )
 
             for seg in chunk_segments:
@@ -289,19 +296,19 @@ class Transcriber:
 
     # ── Backend-specific transcription ──
 
-    def _transcribe_single(self, audio_path, language, on_progress, on_chunk_done, song_mode=False):
+    def _transcribe_single(self, audio_path, language, on_progress, on_chunk_done, song_mode=False, song_opts=None):
         """Transcribe entire file (short files, no extraction)."""
         if self.backend == "mlx":
             results = self._mlx_transcribe(audio_path, language, 0, on_progress, song_mode)
         else:
-            results = self._fw_transcribe(audio_path, language, 0, on_progress, song_mode)
+            results = self._fw_transcribe(audio_path, language, 0, on_progress, song_mode, song_opts)
 
         if on_chunk_done:
             on_chunk_done(results, 1, 1)
         return results
 
     def _transcribe_range(self, audio_path, start_sec, end_sec, total_duration,
-                          language, on_progress, on_chunk_done, song_mode=False):
+                          language, on_progress, on_chunk_done, song_mode=False, song_opts=None):
         """Extract time range via ffmpeg, then transcribe."""
         chunk_duration = end_sec - start_sec
         tmp_path = None
@@ -319,7 +326,7 @@ class Transcriber:
             if self.backend == "mlx":
                 results = self._mlx_transcribe(tmp_path, language, start_sec, on_progress, song_mode)
             else:
-                results = self._fw_transcribe(tmp_path, language, start_sec, on_progress, song_mode)
+                results = self._fw_transcribe(tmp_path, language, start_sec, on_progress, song_mode, song_opts)
 
             if on_chunk_done:
                 on_chunk_done(results, 1, 1)
@@ -391,12 +398,12 @@ class Transcriber:
 
     # ── faster-whisper backend (CUDA / CPU) ──
 
-    def _fw_transcribe(self, audio_path, language, time_offset, on_progress, song_mode=False):
+    def _fw_transcribe(self, audio_path, language, time_offset, on_progress, song_mode=False, song_opts=None):
         """Transcribe using faster-whisper (CTranslate2).
 
         For song_mode, audio is assumed to already be vocal-isolated (e.g. by
-        Demucs); we therefore use near-default speech parameters with only a
-        mild VAD relaxation to handle longer pauses in song phrasing.
+        Demucs). User-tunable knobs (song_opts): vad_threshold, min_silence_ms,
+        beam_size. None falls back to song-mode defaults below.
         """
         fw_opts = dict(
             language=language,
@@ -406,12 +413,18 @@ class Transcriber:
             condition_on_previous_text=False,
         )
         if song_mode:
-            # Isolated vocals often have longer gaps between phrases than speech
+            song_opts = song_opts or {}
+            vad_thresh = song_opts.get("vad_threshold")
+            min_silence_ms = song_opts.get("min_silence_ms")
+            beam_size = song_opts.get("beam_size")
+
             fw_opts["vad_parameters"] = {
-                "threshold": 0.4,
-                "min_silence_duration_ms": 700,
+                "threshold": float(vad_thresh) if vad_thresh is not None else 0.4,
+                "min_silence_duration_ms": int(min_silence_ms) if min_silence_ms is not None else 700,
             }
             fw_opts["no_speech_threshold"] = 0.4
+            if beam_size is not None:
+                fw_opts["beam_size"] = max(1, min(int(beam_size), 5))
             if language == "vi":
                 fw_opts["initial_prompt"] = "Đây là lời bài hát tiếng Việt."
             else:

@@ -89,6 +89,10 @@ class TranscribeRequest(BaseModel):
     language: str | None = None
     start_from: float = 0.0  # Resume from this time (seconds)
     song_mode: bool = False  # Separate vocals with Demucs before transcription
+    # Song-mode tuning (only used when song_mode=True; ignored otherwise)
+    song_vad_threshold: float | None = None     # VAD threshold 0.10–0.90 (default 0.40)
+    song_min_silence_ms: int | None = None      # Phrase gap 200–2000ms (default 700)
+    song_beam_size: int | None = None           # Beam search width 1–5 (default 1)
 
 class SwitchModelRequest(BaseModel):
     model: str
@@ -330,6 +334,22 @@ def serve_audio(path: str):
     return FileResponse(path, media_type=mime or "audio/mpeg")
 
 
+class PeaksRequest(BaseModel):
+    audio_path: str
+    num_peaks: int = 800
+
+@app.post("/peaks")
+def peaks_only(req: PeaksRequest):
+    """Generate waveform peaks + duration without running silence detection.
+    Lets the frontend display a waveform immediately after audio selection."""
+    if not os.path.isfile(req.audio_path):
+        return JSONResponse(status_code=400, content={"error": f"File not found: {req.audio_path}"})
+    audio_path = ensure_accessible(req.audio_path)
+    duration = get_audio_duration(audio_path) or 0
+    pks = generate_peaks(audio_path, num_peaks=req.num_peaks)
+    return {"peaks": pks, "audio_duration": round(duration, 1)}
+
+
 # ── Auto Cut (async — silence detection + peaks in background thread) ──
 
 @app.get("/autocut/progress")
@@ -483,7 +503,8 @@ def _separate_vocals(audio_path):
         return None
 
 
-def _run_transcribe_worker(audio_path, model, language, start_from, song_mode=False):
+def _run_transcribe_worker(audio_path, model, language, start_from, song_mode=False,
+                           song_vad_threshold=None, song_min_silence_ms=None, song_beam_size=None):
     """Background worker for whisper transcription with chunked processing."""
     global transcriber, transcribe_progress
 
@@ -594,6 +615,9 @@ def _run_transcribe_worker(audio_path, model, language, start_from, song_mode=Fa
             start_from=start_from,
             on_chunk_done=on_chunk_done,
             song_mode=song_mode,
+            song_vad_threshold=song_vad_threshold,
+            song_min_silence_ms=song_min_silence_ms,
+            song_beam_size=song_beam_size,
         )
 
         # Format final segments
@@ -647,6 +671,11 @@ def transcribe_audio(req: TranscribeRequest):
     thread = threading.Thread(
         target=_run_transcribe_worker,
         args=(req.audio_path, req.model, req.language, req.start_from, req.song_mode),
+        kwargs={
+            "song_vad_threshold": req.song_vad_threshold,
+            "song_min_silence_ms": req.song_min_silence_ms,
+            "song_beam_size": req.song_beam_size,
+        },
         daemon=True,
     )
     thread.start()

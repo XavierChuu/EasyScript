@@ -375,7 +375,7 @@ async function runAutoCut() {
 
 let _parallelDiarizePromise = null;
 
-async function runTranscribe(resumeFromPlayhead = false, songMode = false) {
+async function runTranscribe(resumeFromPlayhead = false, songMode = false, songParams = null) {
   const audioPath = document.getElementById("audioPathInput").value.trim();
   if (!audioPath) return;
 
@@ -398,15 +398,21 @@ async function runTranscribe(resumeFromPlayhead = false, songMode = false) {
     }
 
     // 1. Fire POST to start transcription (returns immediately)
+    const body = {
+      audio_path: audioPath,
+      model: selectedModel,
+      language: selectedLang,
+      start_from: startFrom,
+      song_mode: songMode,
+    };
+    if (songMode && songParams) {
+      body.song_vad_threshold = songParams.vad_threshold;
+      body.song_min_silence_ms = songParams.min_silence_ms;
+      body.song_beam_size = songParams.beam_size;
+    }
     await fetchBackend("/transcribe", {
       method: "POST",
-      body: JSON.stringify({
-        audio_path: audioPath,
-        model: selectedModel,
-        language: selectedLang,
-        start_from: startFrom,
-        song_mode: songMode,
-      }),
+      body: JSON.stringify(body),
     });
 
     // 2. If "Include speakers" is checked, start diarization in PARALLEL
@@ -508,9 +514,13 @@ function showAudioInfo(result) {
   const dur = result.audio_duration;
   const dm = Math.floor(dur / 60);
   const ds = Math.round(dur % 60);
-  const silCount = (result.segments || []).filter(s => s.type === "silence").length;
-  const breathCount = (result.segments || []).filter(s => s.type === "breath").length;
-  info.textContent = `Duration: ${dm}m ${String(ds).padStart(2,"0")}s — ${silCount} silence, ${breathCount} breath segments`;
+  let text = `Duration: ${dm}m ${String(ds).padStart(2, "0")}s`;
+  if (result.segments) {
+    const silCount = result.segments.filter(s => s.type === "silence").length;
+    const breathCount = result.segments.filter(s => s.type === "breath").length;
+    text += ` — ${silCount} silence, ${breathCount} breath segments`;
+  }
+  info.textContent = text;
   info.classList.remove("hidden");
 }
 
@@ -3208,15 +3218,51 @@ async function refreshHyMT2Status() {
 document.getElementById("progressCancelBtn").addEventListener("click", () => progressTracker.cancel());
 document.getElementById("autoCutBtn").addEventListener("click", runAutoCut);
 // Show transcribe mode dialog, then run with selected mode
+function setupTranscribeModeDialogOnce() {
+  if (setupTranscribeModeDialogOnce._done) return;
+  setupTranscribeModeDialogOnce._done = true;
+
+  const panel = document.getElementById("songParamsPanel");
+  const syncPanelVisibility = () => {
+    const isSong = document.getElementById("modeSong").checked;
+    panel.classList.toggle("hidden", !isSong);
+  };
+  document.getElementById("modeAudio").addEventListener("change", syncPanelVisibility);
+  document.getElementById("modeSong").addEventListener("change", syncPanelVisibility);
+
+  const vadEl = document.getElementById("songVadThresh");
+  const vadVal = document.getElementById("songVadThreshVal");
+  vadEl.addEventListener("input", () => { vadVal.textContent = (vadEl.value / 100).toFixed(2); });
+
+  const silEl = document.getElementById("songMinSilence");
+  const silVal = document.getElementById("songMinSilenceVal");
+  silEl.addEventListener("input", () => { silVal.textContent = `${silEl.value}ms`; });
+
+  const beamEl = document.getElementById("songBeamSize");
+  const beamVal = document.getElementById("songBeamSizeVal");
+  beamEl.addEventListener("input", () => { beamVal.textContent = beamEl.value; });
+}
+
+function readSongParams() {
+  return {
+    vad_threshold: parseInt(document.getElementById("songVadThresh").value, 10) / 100,
+    min_silence_ms: parseInt(document.getElementById("songMinSilence").value, 10),
+    beam_size: parseInt(document.getElementById("songBeamSize").value, 10),
+  };
+}
+
 function showTranscribeModeDialog(resumeFromPlayhead = false) {
+  setupTranscribeModeDialogOnce();
   const dialog = document.getElementById("transcribeModeDialog");
   document.getElementById("modeAudio").checked = true;
+  document.getElementById("songParamsPanel").classList.add("hidden");
   dialog.classList.remove("hidden");
 
   document.getElementById("transcribeModeConfirm").onclick = () => {
     dialog.classList.add("hidden");
     const songMode = document.getElementById("modeSong").checked;
-    runTranscribe(resumeFromPlayhead, songMode);
+    const songParams = songMode ? readSongParams() : null;
+    runTranscribe(resumeFromPlayhead, songMode, songParams);
   };
   document.getElementById("transcribeModeCancel").onclick = () => {
     dialog.classList.add("hidden");
@@ -3275,6 +3321,46 @@ document.getElementById("exportFolderPath").addEventListener("click", chooseExpo
 
 function isDevMode() { return !ppro; }
 
+async function loadWaveformForPath(audioPath) {
+  if (!audioPath) return;
+  const info = document.getElementById("audioInfo");
+  info.textContent = "Generating waveform…";
+  info.classList.remove("hidden");
+  try {
+    const res = await fetch(`${BACKEND_URL}/peaks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ audio_path: audioPath }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    // Fresh file selected — reset any prior session state
+    segments = [];
+    hasTranscription = false;
+
+    audioDuration = data.audio_duration || 0;
+    const peaks = (data.peaks && data.peaks.length)
+      ? data.peaks
+      : waveform.generateMockPeaks(audioDuration, 800);
+    waveform.loadPeaks(peaks, audioDuration);
+    waveform.updateMarkers([]);
+
+    currentAudioPath = audioPath;
+    audioPlayback.loadAudio(audioPath);
+
+    renderSegments(segments);
+    updateSegmentCount(segments);
+    updateCutStats();
+    updateExportButtons();
+    showAudioInfo({ audio_duration: audioDuration });
+  } catch (err) {
+    console.error("[peaks] Failed to load waveform:", err);
+    info.textContent = `Waveform unavailable: ${err.message}`;
+  }
+}
+
 function setupFileBrowse() {
   const pathInput = document.getElementById("audioPathInput");
   pathInput.addEventListener("input", () => updateActionButtons());
@@ -3293,6 +3379,8 @@ function setupFileBrowse() {
       const data = await res.json();
       pathInput.value = data.path;
       pathInput.dispatchEvent(new Event("input"));
+      // Auto-load waveform so user can Transcribe / Speakers without running Detect Silence first
+      loadWaveformForPath(data.path);
     } catch (err) {
       pathInput.value = "";
       alert(`Upload failed: ${err.message}`);

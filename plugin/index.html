@@ -39,7 +39,7 @@
           <input type="text" class="input-text" id="audioPathInput" placeholder="Audio file path..." readonly />
           <label class="btn btn-icon" id="browseBtn" title="Browse audio file">
             <input type="file" id="filePicker" accept="audio/*,video/*" style="display:none" />
-            📂
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>
           </label>
         </div>
         <!-- Audio info after loading -->
@@ -260,7 +260,7 @@
             <button class="filter-tab" data-filter="translation">Translation</button>
           </div>
           <div class="filter-actions">
-            <button class="btn-icon-sm" id="searchToggleBtn" title="Search & Replace">🔍</button>
+            <button class="btn-icon-sm" id="searchToggleBtn" title="Search & Replace"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
           </div>
         </div>
 
@@ -326,7 +326,7 @@
         <div class="export-folder-row">
           <span class="export-folder-label">Save to:</span>
           <span class="export-folder-path" id="exportFolderPath" title="Click to change">~/Downloads</span>
-          <button class="btn btn-xs" id="chooseFolderBtn" title="Choose folder">📁</button>
+          <button class="btn btn-xs" id="chooseFolderBtn" title="Choose folder"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg></button>
         </div>
         <div class="export-info" id="exportInfo"></div>
       </div>
@@ -530,7 +530,7 @@
             <button class="filter-tab" data-live-filter="translation">Translation</button>
           </div>
           <div class="filter-actions">
-            <button class="btn-icon-sm" id="liveSearchToggleBtn" title="Search & Replace">🔍</button>
+            <button class="btn-icon-sm" id="liveSearchToggleBtn" title="Search & Replace"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>
           </div>
         </div>
         <!-- Translation language tabs (visible when Translation tab active) -->
@@ -681,6 +681,24 @@
           <span class="modal-option-desc">Isolates vocals from music with Demucs, then transcribes the clean vocal track (+30-90s).</span>
         </div>
       </label>
+      <div class="song-params hidden" id="songParamsPanel">
+        <div class="seg-setting-label">Tune lyric recognition</div>
+        <div class="control-row">
+          <label class="control-label" title="Lower = catch quiet/falsetto vocals · Higher = strict, ignore noise">Vocal sensitivity</label>
+          <input type="range" class="control-slider" id="songVadThresh" min="10" max="90" value="40" step="5" />
+          <span class="control-value" id="songVadThreshVal">0.40</span>
+        </div>
+        <div class="control-row">
+          <label class="control-label" title="Minimum silence between phrases (shorter = more line splits)">Phrase gap</label>
+          <input type="range" class="control-slider" id="songMinSilence" min="200" max="2000" value="700" step="50" />
+          <span class="control-value" id="songMinSilenceVal">700ms</span>
+        </div>
+        <div class="control-row">
+          <label class="control-label" title="Beam search width — higher = more coherent lyrics but 3-5x slower">Decode quality</label>
+          <input type="range" class="control-slider" id="songBeamSize" min="1" max="5" value="1" step="1" />
+          <span class="control-value" id="songBeamSizeVal">1</span>
+        </div>
+      </div>
       <div class="btn-row mt-8">
         <button class="btn" id="transcribeModeCancel">Cancel</button>
         <button class="btn btn-primary" id="transcribeModeConfirm">Start Transcription</button>

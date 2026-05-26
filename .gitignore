@@ -2,6 +2,9 @@
 dist/
 backend/build/
 
+# Release artifacts (zipped bundles uploaded manually to GitHub Releases)
+EasyScript-v*.zip
+
 # Bundled binaries (ffmpeg/ffprobe — too large; downloaded by build script)
 backend/bin/
 
