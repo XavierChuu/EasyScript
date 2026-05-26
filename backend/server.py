@@ -21,6 +21,7 @@ from transcriber import Transcriber, is_model_cached, MODEL_SIZES
 from silence_detector import SilenceDetector
 from diarizer import Diarizer
 from translator import get_translator, OllamaTranslator, HyMT2Translator
+from ffmpeg_utils import run_ffmpeg, run_silent, get_ffmpeg_exe
 
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "easyscript_uploads")
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".easyscript", "settings.json")
@@ -155,8 +156,8 @@ def ensure_accessible(audio_path: str) -> str:
 
     # Try 2: ffmpeg copy (ffmpeg may have separate TCC permissions)
     try:
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", audio_path, "-c", "copy", dest],
+        result = run_ffmpeg(
+            ["-y", "-i", audio_path, "-c", "copy", dest],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode == 0 and os.path.isfile(dest):
@@ -170,16 +171,9 @@ def ensure_accessible(audio_path: str) -> str:
 
 
 def get_audio_duration(audio_path):
-    """Get audio duration in seconds using ffprobe (fast, header-only)."""
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-            capture_output=True, text=True, timeout=10,
-        )
-        return float(result.stdout.strip())
-    except Exception:
-        return 0
+    """Get audio duration in seconds (uses bundled ffmpeg, no ffprobe needed)."""
+    from ffmpeg_utils import get_audio_duration as _get_dur
+    return _get_dur(audio_path)
 
 def generate_peaks(audio_path, num_peaks=800):
     """Generate waveform peaks using ffmpeg raw PCM output.
@@ -202,11 +196,10 @@ def generate_peaks(audio_path, num_peaks=800):
         # Timeout scales with duration: minimum 30s, ~1s per minute of audio
         timeout = max(30, int(duration / 60) + 15)
 
-        cmd = [
-            "ffmpeg", "-i", audio_path,
-            "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"
-        ]
-        result = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        result = run_ffmpeg(
+            ["-i", audio_path, "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"],
+            capture_output=True, timeout=timeout,
+        )
         raw = result.stdout
         if not raw:
             return []
@@ -249,9 +242,10 @@ def generate_peaks(audio_path, num_peaks=800):
 
 @app.get("/health")
 def health():
-    # Check ffmpeg availability
-    ffmpeg_path = shutil.which("ffmpeg")
-    ffmpeg_ok = bool(ffmpeg_path)
+    # Resolve ffmpeg via bundled imageio-ffmpeg (works in bundle); fall back
+    # to whatever's on PATH.
+    ffmpeg_path = get_ffmpeg_exe()
+    ffmpeg_ok = bool(ffmpeg_path) and os.path.isfile(ffmpeg_path)
 
     return {
         "status": "ok",
@@ -312,8 +306,8 @@ async def upload_audio(file: UploadFile = File(...)):
         wav_name = os.path.splitext(file.filename)[0] + "_audio.wav"
         wav_path = os.path.join(UPLOAD_DIR, wav_name)
         try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", save_path, "-vn", "-acodec", "pcm_s16le",
+            run_ffmpeg(
+                ["-y", "-i", save_path, "-vn", "-acodec", "pcm_s16le",
                  "-ar", "16000", "-ac", "1", wav_path],
                 capture_output=True, timeout=300,
             )
@@ -440,8 +434,10 @@ def get_transcribe_progress():
 def _separate_vocals(audio_path):
     """Run Demucs to extract vocals. Returns vocals WAV path, or None on failure.
 
-    Invokes _demucs_runner.py which monkey-patches torchaudio.load to use
-    soundfile (bypassing the broken torchcodec dependency on Windows).
+    Uses _demucs_runner which monkey-patches torchaudio.load to soundfile
+    (bypassing torchcodec). In dev mode: subprocess via system Python. In
+    bundled mode (PyInstaller): multiprocessing.Process (subprocess to the
+    frozen exe with a script arg doesn't work).
     """
     import sys
     basename = os.path.splitext(os.path.basename(audio_path))[0]
@@ -453,15 +449,18 @@ def _separate_vocals(audio_path):
         return vocals_path
 
     # Detect if running in PyInstaller bundle (sys.executable is not Python).
-    bundled = getattr(sys, 'frozen', False) or getattr(sys, '_MEIPASS', None) is not None
+    bundled = getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None) is not None
 
     try:
         if bundled:
-            # In bundled mode, invoke the runner in-process.
+            # In bundled mode, invoke the runner in-process (sys.executable
+            # points to the GUI exe, so subprocess(sys.executable, ...) would
+            # relaunch EasyScript instead of running demucs).
             from _demucs_runner import run_demucs_main
             run_demucs_main(output_dir, audio_path)
         else:
-            runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_demucs_runner.py")
+            runner = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "_demucs_runner.py")
             result = subprocess.run(
                 [sys.executable, runner, output_dir, audio_path],
                 capture_output=True, text=True, timeout=900,
@@ -974,9 +973,10 @@ def _run_hymt2_download(model_size: str):
         os.makedirs(cache_dir, exist_ok=True)
 
         # Detect if running in PyInstaller bundle. In that case sys.executable
-        # is the bundled .app binary, not Python — so subprocess calls with
-        # `-c` will fail. Download in-process instead.
-        bundled = getattr(sys, 'frozen', False) or getattr(sys, '_MEIPASS', None) is not None
+        # is the bundled binary (Windows .exe or macOS .app), not Python — so
+        # `subprocess.run([sys.executable, "-c", ...])` would re-launch the
+        # GUI app instead of running Python. Download in-process instead.
+        bundled = getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None) is not None
 
         if bundled:
             from huggingface_hub import snapshot_download

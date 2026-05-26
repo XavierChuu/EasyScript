@@ -6,6 +6,19 @@ import multiprocessing
 import os
 import sys
 
+# In windowed PyInstaller bundles, sys.stdout/stderr are None, which breaks
+# uvicorn's logger (calls .isatty()) and any library that writes to stderr.
+# Replace with no-op streams that satisfy the isatty/write/flush protocol.
+class _NullStream:
+    def write(self, *a, **k): return 0
+    def flush(self): pass
+    def isatty(self): return False
+    def fileno(self): raise OSError("no fileno in windowed bundle")
+if sys.stdout is None:
+    sys.stdout = _NullStream()
+if sys.stderr is None:
+    sys.stderr = _NullStream()
+
 # CRITICAL: Must be called before anything else in a PyInstaller bundle.
 # Without this, every multiprocessing subprocess re-executes main() → fork bomb.
 multiprocessing.freeze_support()
@@ -110,37 +123,48 @@ def main():
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    # Ensure ffmpeg/ffprobe are findable — PyInstaller bundles strip PATH
-    # Priority: bundled bin/ → homebrew → system
+    # If bundled (PyInstaller), sys._MEIPASS is set; make backend modules importable
+    if getattr(sys, "_MEIPASS", None):
+        sys.path.insert(0, sys._MEIPASS)
+
+    # ── ffmpeg resolution ──
+    # Two paths exist, both supported:
+    #  - Windows / cross-platform: imageio-ffmpeg's bundled binary (resolved
+    #    via ffmpeg_utils.setup_ffmpeg_path → prepends its dir to PATH).
+    #  - macOS .app: a Mac ffmpeg/ffprobe is sometimes shipped in backend/bin/
+    #    (or _MEIPASS/bin in the frozen bundle). We expose that too.
     bundled_bin = None
-    if getattr(sys, '_MEIPASS', None):
-        # In PyInstaller bundle: bin/ is alongside the main resources
-        candidate = os.path.join(sys._MEIPASS, "bin")
-        if os.path.isdir(candidate):
-            bundled_bin = candidate
+    if getattr(sys, "_MEIPASS", None):
+        cand = os.path.join(sys._MEIPASS, "bin")
+        if os.path.isdir(cand):
+            bundled_bin = cand
     if not bundled_bin:
-        # Dev mode: backend/bin/
-        candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
-        if os.path.isdir(candidate):
-            bundled_bin = candidate
+        cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+        if os.path.isdir(cand):
+            bundled_bin = cand
+
+    try:
+        from ffmpeg_utils import setup_ffmpeg_path, get_ffmpeg_exe
+        setup_ffmpeg_path()
+        mlog(f"[main] ffmpeg: {get_ffmpeg_exe()}")
+    except Exception as e:
+        mlog(f"[main] ffmpeg setup failed: {e}")
 
     extra_paths = []
     if bundled_bin:
         extra_paths.append(bundled_bin)
     extra_paths += [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/opt/local/bin",
+        "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/opt/local/bin",
         os.path.expanduser("~/bin"),
     ]
     current_path = os.environ.get("PATH", "")
     for p in extra_paths:
         if os.path.isdir(p) and p not in current_path:
-            current_path = p + ":" + current_path
+            current_path = p + os.pathsep + current_path
     os.environ["PATH"] = current_path
 
-    # Ensure bundled ffmpeg has exec permissions (PyInstaller may not preserve)
+    # On Mac, ensure bundled ffmpeg/ffprobe stay executable (PyInstaller
+    # extracts data files without the +x bit on some setups).
     if bundled_bin:
         for binname in ("ffmpeg", "ffprobe"):
             bp = os.path.join(bundled_bin, binname)
@@ -150,11 +174,7 @@ def main():
                 except OSError:
                     pass
 
-    # Log ffmpeg status for debugging
-    import shutil
-    ffmpeg_loc = shutil.which("ffmpeg")
-    mlog(f"[main] ffmpeg: {ffmpeg_loc or 'NOT FOUND'}")
-    mlog(f"[main] PATH: {os.environ['PATH']}")
+    mlog(f"[main] PATH: {os.environ['PATH'][:200]}...")
 
     # Determine frontend source path
     frontend_dir = resource_path(os.path.join("..", "plugin"))

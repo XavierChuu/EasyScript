@@ -5,7 +5,8 @@ Identifies who speaks when in an audio file.
 
 import os
 import platform
-import subprocess
+
+from ffmpeg_utils import run_ffmpeg
 
 
 def detect_torch_device():
@@ -157,8 +158,8 @@ class Diarizer:
             if on_progress:
                 on_progress(0.08)
 
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", audio_path,
+            run_ffmpeg(
+                ["-y", "-i", audio_path,
                  "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", tmp_wav],
                 capture_output=True, timeout=120,
             )
@@ -266,13 +267,9 @@ class Diarizer:
 
     @staticmethod
     def get_duration(audio_path):
-        """Get audio duration using ffprobe."""
+        """Get audio duration (uses bundled ffmpeg, no ffprobe needed)."""
         try:
-            result = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-                capture_output=True, text=True, timeout=10,
-            )
-            return float(result.stdout.strip())
+            from ffmpeg_utils import get_audio_duration
+            return get_audio_duration(audio_path)
         except Exception:
             return 0

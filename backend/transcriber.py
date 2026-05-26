@@ -1,22 +1,53 @@
-import subprocess
 import tempfile
 import platform
 import os
+import sys
 
-# Add NVIDIA CUDA/cuDNN DLL directories on Windows if installed via pip packages
+from ffmpeg_utils import run_silent, run_ffmpeg
+
+# Add NVIDIA CUDA/cuDNN DLL directories on Windows so faster-whisper can
+# load cublas64_12.dll / cudnn_*.dll. We search two places:
+#  - dev venv: site-packages/nvidia/*/bin (pip-installed cuBLAS/cuDNN)
+#  - bundle:   _MEIPASS/nvidia/*/bin (PyInstaller-collected dynamic libs)
 if platform.system() == "Windows":
-    import site
     from pathlib import Path
-    for sd in site.getsitepackages():
-        nvidia_path = Path(sd) / "nvidia"
-        if nvidia_path.exists():
+
+    def _add_nvidia_dll_paths():
+        roots = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            # PyInstaller flattens DLLs into _MEIPASS root → make it searchable.
+            try:
+                os.add_dll_directory(meipass)
+            except Exception:
+                pass
+            roots.append(Path(meipass))
+        try:
+            import site
+            for sd in site.getsitepackages():
+                roots.append(Path(sd))
+        except Exception:
+            pass
+
+        seen = set()
+        for root in roots:
+            nvidia_path = root / "nvidia"
+            if not nvidia_path.exists():
+                continue
             for sub in nvidia_path.iterdir():
                 bin_dir = sub / "bin"
-                if bin_dir.exists():
-                    try:
-                        os.add_dll_directory(str(bin_dir))
-                    except Exception:
-                        pass
+                if not bin_dir.exists():
+                    continue
+                key = str(bin_dir).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    os.add_dll_directory(str(bin_dir))
+                except Exception:
+                    pass
+
+    _add_nvidia_dll_paths()
 
 
 
@@ -97,9 +128,9 @@ def detect_best_backend():
 
 def _get_apple_chip():
     try:
-        result = subprocess.run(
+        result = run_silent(
             ["sysctl", "-n", "machdep.cpu.brand_string"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
         )
         return result.stdout.strip() or "Apple Silicon"
     except Exception:
@@ -108,9 +139,9 @@ def _get_apple_chip():
 
 def _get_nvidia_gpu_name():
     try:
-        result = subprocess.run(
+        result = run_silent(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
         )
         return result.stdout.strip().split("\n")[0] or "NVIDIA GPU"
     except Exception:
@@ -147,23 +178,46 @@ class Transcriber:
         # mlx-whisper loads model lazily on first transcribe call
 
     def _init_faster_whisper(self, model_size, device):
-        """Initialize faster-whisper (CUDA or CPU)."""
+        """Initialize faster-whisper (CUDA or CPU).
+
+        If `device="auto"` (default) and CUDA is reported available, we try
+        loading the model on CUDA first. If that fails for any reason — most
+        commonly because the bundled NVIDIA DLLs (cublas/cudnn) can't be
+        loaded on this machine — we silently fall back to CPU and update
+        `device_name` so the UI reflects what's actually being used.
+        """
         from faster_whisper import WhisperModel
 
+        want_cuda = False
         if device == "auto":
             try:
                 import ctranslate2
-                device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+                want_cuda = ctranslate2.get_cuda_device_count() > 0
             except Exception:
-                device = "cpu"
+                want_cuda = False
+            device = "cuda" if want_cuda else "cpu"
+        elif device == "cuda":
+            want_cuda = True
 
-        compute_type = "float16" if device == "cuda" else "int8"
-        self.model = WhisperModel(
-            model_size,
-            device=device,
-            compute_type=compute_type,
-            cpu_threads=os.cpu_count() or 4,
-        )
+        def _load(dev):
+            ct = "float16" if dev == "cuda" else "int8"
+            return WhisperModel(
+                model_size,
+                device=dev,
+                compute_type=ct,
+                cpu_threads=os.cpu_count() or 4,
+            )
+
+        if device == "cuda":
+            try:
+                self.model = _load("cuda")
+                return
+            except Exception as e:
+                print(f"[Transcriber] CUDA init failed ({e}); falling back to CPU.")
+                cpu = platform.processor() or platform.machine()
+                self.device_name = f"CPU ({cpu})"
+
+        self.model = _load("cpu")
 
     # ── Public API ──
 
@@ -256,15 +310,11 @@ class Transcriber:
             tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
             os.close(tmp_fd)
 
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", str(start_sec),
-                "-t", str(chunk_duration),
-                "-i", audio_path,
-                "-ac", "1", "-ar", "16000",
-                tmp_path,
-            ]
-            subprocess.run(cmd, capture_output=True, timeout=60)
+            run_ffmpeg(
+                ["-y", "-ss", str(start_sec), "-t", str(chunk_duration),
+                 "-i", audio_path, "-ac", "1", "-ar", "16000", tmp_path],
+                capture_output=True, timeout=60,
+            )
 
             if self.backend == "mlx":
                 results = self._mlx_transcribe(tmp_path, language, start_sec, on_progress, song_mode)
@@ -423,11 +473,8 @@ class Transcriber:
     @staticmethod
     def _get_duration(audio_path):
         try:
-            result = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-                capture_output=True, text=True, timeout=10,
-            )
-            return float(result.stdout.strip())
+            from ffmpeg_utils import get_audio_duration
+            d = get_audio_duration(audio_path)
+            return d if d > 0 else None
         except Exception:
             return None

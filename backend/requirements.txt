@@ -11,3 +11,14 @@ pywebview==6.2.1
 transformers>=4.40.0
 huggingface_hub>=0.22.0
 torch>=2.2.0; sys_platform != "darwin" or platform_machine != "arm64"
+soundfile>=0.12.0
+imageio-ffmpeg>=0.5.0
+# Optional: music vocal isolation (song mode)
+demucs>=4.0.0
+# Optional: speaker diarization
+pyannote.audio>=3.3.0,<4.0.0
+# NVIDIA CUDA runtime DLLs (Windows GPU acceleration for faster-whisper).
+# Safe to install on machines without a GPU — they're just unused.
+nvidia-cublas-cu12; sys_platform == "win32"
+nvidia-cudnn-cu12; sys_platform == "win32"
+nvidia-cuda-nvrtc-cu12; sys_platform == "win32"

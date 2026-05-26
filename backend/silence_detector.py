@@ -1,6 +1,7 @@
 import re
-import subprocess
 import math
+
+from ffmpeg_utils import run_ffmpeg
 
 
 class SilenceDetector:
@@ -65,21 +66,18 @@ class SilenceDetector:
         """Run ffmpeg silencedetect on a specific chunk of the audio."""
         min_silence_sec = min_silence_ms / 1000.0
 
-        cmd = [
-            "ffmpeg",
+        args = [
             "-ss", str(start_sec),
             "-t", str(duration_sec),
             "-i", audio_path,
             "-af", f"silencedetect=noise={silence_thresh_db}dB:d={min_silence_sec}",
-            "-f", "null", "-"
+            "-f", "null", "-",
         ]
 
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=180
-            )
+            result = run_ffmpeg(args, capture_output=True, text=True, timeout=180)
             stderr = result.stderr
-        except subprocess.TimeoutExpired:
+        except Exception:
             return []
 
         # Parse silence_start / silence_end from stderr
@@ -112,13 +110,10 @@ class SilenceDetector:
 
     @staticmethod
     def _get_duration(audio_path):
-        """Get audio duration via ffprobe."""
+        """Get audio duration (uses bundled ffmpeg, no ffprobe needed)."""
         try:
-            result = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-                capture_output=True, text=True, timeout=10,
-            )
-            return float(result.stdout.strip())
+            from ffmpeg_utils import get_audio_duration
+            d = get_audio_duration(audio_path)
+            return d if d > 0 else None
         except Exception:
             return None
