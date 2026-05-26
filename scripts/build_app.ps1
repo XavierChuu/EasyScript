@@ -73,6 +73,18 @@ if (Test-Path $TransformersDir) {
     & $VenvPython -m compileall -q -b $TransformersDir | Out-Null
 }
 
+# ── Post-build: drop the duplicate _internal/nvidia/ subtree ──
+# PyInstaller bundles nvidia DLLs twice — once at _internal root (our spec)
+# and once under _internal/nvidia/<pkg>/bin/ (auto-pulled by deps). The root
+# copies are what CTranslate2's LoadLibrary("cublas64_12.dll") finds, so the
+# subfolder copies are dead weight (~900 MB).
+$NvidiaDup = Join-Path $DistDir "EasyScript\_internal\nvidia"
+if (Test-Path $NvidiaDup) {
+    Write-Host ""
+    Write-Host "Removing duplicate _internal/nvidia/ (~900MB)..." -ForegroundColor Yellow
+    Remove-Item $NvidiaDup -Recurse -Force
+}
+
 # ── Report result ──
 $ExePath = Join-Path $DistDir "EasyScript\EasyScript.exe"
 Write-Host ""
