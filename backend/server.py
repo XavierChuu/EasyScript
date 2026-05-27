@@ -14,13 +14,13 @@ import wave
 
 from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from transcriber import Transcriber, is_model_cached, MODEL_SIZES
 from silence_detector import SilenceDetector
 from diarizer import Diarizer
-from translator import get_translator, OllamaTranslator, HyMT2Translator
+from translator import get_translator, OllamaTranslator, HyMT2Translator, NLLBTranslator
 from ffmpeg_utils import run_ffmpeg, run_silent, get_ffmpeg_exe
 
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "easyscript_uploads")
@@ -100,14 +100,23 @@ class SwitchModelRequest(BaseModel):
 class DiarizeRequest(BaseModel):
     audio_path: str
     segments: list[dict] = []  # Speech segments to merge speakers into
+    # Optional speaker-count hints — passed to pyannote to skip its
+    # cluster-size search. num_speakers wins if both are provided.
+    num_speakers: Optional[int] = None
+    min_speakers: Optional[int] = None
+    max_speakers: Optional[int] = None
+    # "standard" | "sensitive" | "max" — controls pyannote's
+    # min_cluster_size + clustering threshold for brief-utterance detection.
+    sensitivity: Optional[str] = None
 
 class TranslateRequest(BaseModel):
     segments: list[dict]  # [{ text: "...", start: ..., end: ... }]
     source_lang: str
     target_lang: str
-    provider: str = "ollama"  # "ollama", "claude", or "hymt2"
+    provider: str = "ollama"  # "ollama", "claude", "hymt2", or "nllb"
     model: Optional[str] = None
     hymt2_model_size: Optional[str] = None
+    nllb_model_size: Optional[str] = None
 
 class TranslateOneRequest(BaseModel):
     text: str
@@ -116,6 +125,7 @@ class TranslateOneRequest(BaseModel):
     provider: str = "ollama"
     model: Optional[str] = None
     hymt2_model_size: Optional[str] = None
+    nllb_model_size: Optional[str] = None
 
 class SaveFileRequest(BaseModel):
     filename: str
@@ -720,7 +730,9 @@ def update_settings(data: dict):
 def get_diarize_progress():
     return diarize_progress
 
-def _run_diarize_worker(audio_path, speech_segments):
+def _run_diarize_worker(audio_path, speech_segments,
+                        num_speakers=None, min_speakers=None, max_speakers=None,
+                        sensitivity=None):
     """Background worker for speaker diarization."""
     global diarize_progress, diarizer
 
@@ -766,7 +778,13 @@ def _run_diarize_worker(audio_path, speech_segments):
                 "detail": f"Identifying speakers... {round(p * 100)}%{dur_str}",
             })
 
-        diarize_segments = diarizer.diarize(audio_path, on_progress=on_progress)
+        diarize_segments = diarizer.diarize(
+            audio_path, on_progress=on_progress,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+            sensitivity=sensitivity,
+        )
 
         diarize_progress.update({
             "progress": 0.92, "stage": "merging",
@@ -812,6 +830,12 @@ def diarize_audio(req: DiarizeRequest):
     thread = threading.Thread(
         target=_run_diarize_worker,
         args=(req.audio_path, req.segments),
+        kwargs={
+            "num_speakers": req.num_speakers,
+            "min_speakers": req.min_speakers,
+            "max_speakers": req.max_speakers,
+            "sensitivity": req.sensitivity,
+        },
         daemon=True,
     )
     thread.start()
@@ -825,7 +849,50 @@ def diarize_audio(req: DiarizeRequest):
 def get_translate_progress():
     return translate_progress
 
-def _run_translate_worker(segments, source_lang, target_lang, provider, model, hymt2_model_size=None):
+# Module-level cache for translators that load big models — we want to keep
+# the model resident across requests (cold loads are expensive).
+_nllb_instances: dict[str, NLLBTranslator] = {}
+
+def _get_nllb_translator(model_size: str) -> NLLBTranslator:
+    """Return a cached NLLBTranslator for the given size (keeps weights in RAM/VRAM)."""
+    if model_size not in _nllb_instances:
+        _nllb_instances[model_size] = NLLBTranslator(model_size=model_size)
+    return _nllb_instances[model_size]
+
+
+def _build_translator_kwargs(provider, settings, model=None,
+                              hymt2_model_size=None, nllb_model_size=None):
+    """DRY: build provider-specific kwargs for get_translator() from settings."""
+    kwargs = {}
+    if provider == "claude":
+        kwargs["api_key"] = settings.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+    elif provider == "hymt2":
+        kwargs["model_size"] = hymt2_model_size or settings.get("hymt2_model_size", "1.8B")
+    elif provider == "nllb":
+        kwargs["model_size"] = nllb_model_size or settings.get("nllb_model_size", "600M")
+    else:  # ollama
+        kwargs["base_url"] = settings.get("ollama_url", "http://localhost:11434")
+        resolved_model = model or settings.get("ollama_model", "") or os.environ.get("OLLAMA_MODEL", "")
+        if resolved_model:
+            kwargs["model"] = resolved_model
+    return kwargs
+
+
+def _make_translator(provider, settings, model=None,
+                     hymt2_model_size=None, nllb_model_size=None):
+    """Get translator instance, using cached weights for NLLB."""
+    if provider == "nllb":
+        size = nllb_model_size or settings.get("nllb_model_size", "600M")
+        return _get_nllb_translator(size)
+    kwargs = _build_translator_kwargs(
+        provider, settings, model=model,
+        hymt2_model_size=hymt2_model_size, nllb_model_size=nllb_model_size,
+    )
+    return get_translator(provider=provider, **kwargs)
+
+
+def _run_translate_worker(segments, source_lang, target_lang, provider, model,
+                          hymt2_model_size=None, nllb_model_size=None):
     """Background worker for translation with partial result streaming."""
     global translate_progress
 
@@ -838,21 +905,10 @@ def _run_translate_worker(segments, source_lang, target_lang, provider, model, h
             "partial_segments": None,
         })
 
-        # Build translator kwargs from settings
-        kwargs = {}
-        if provider == "claude":
-            kwargs["api_key"] = settings.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
-        elif provider == "hymt2":
-            resolved_size = hymt2_model_size or settings.get("hymt2_model_size", "1.8B")
-            kwargs["model_size"] = resolved_size
-        else:
-            kwargs["base_url"] = settings.get("ollama_url", "http://localhost:11434")
-            # Use model from request, then saved settings, then env var
-            resolved_model = model or settings.get("ollama_model", "") or os.environ.get("OLLAMA_MODEL", "")
-            if resolved_model:
-                kwargs["model"] = resolved_model
-
-        translator = get_translator(provider=provider, **kwargs)
+        translator = _make_translator(
+            provider, settings, model=model,
+            hymt2_model_size=hymt2_model_size, nllb_model_size=nllb_model_size,
+        )
 
         # Collect partial results as batches complete
         all_translated = [{"text": ""}] * len(segments)
@@ -921,7 +977,11 @@ def translate_text(req: TranslateRequest):
 
     thread = threading.Thread(
         target=_run_translate_worker,
-        args=(req.segments, req.source_lang, req.target_lang, req.provider, req.model, req.hymt2_model_size),
+        args=(req.segments, req.source_lang, req.target_lang, req.provider, req.model),
+        kwargs={
+            "hymt2_model_size": req.hymt2_model_size,
+            "nllb_model_size": req.nllb_model_size,
+        },
         daemon=True,
     )
     thread.start()
@@ -929,25 +989,87 @@ def translate_text(req: TranslateRequest):
     return {"status": "started", "message": "Translation started. Poll /translate/progress for updates."}
 
 
+@app.post("/translate/stream")
+def translate_stream(req: TranslateOneRequest):
+    """Stream translation tokens for a single text (live mode).
+
+    Returns text/plain chunked body. Ollama and NLLB both produce real token
+    streams; Claude/Hy-MT2 fall back to a non-streamed single chunk.
+    """
+    settings = load_settings()
+
+    if req.provider == "ollama":
+        base_url = settings.get("ollama_url", "http://localhost:11434")
+        resolved_model = req.model or settings.get("ollama_model", "") or os.environ.get("OLLAMA_MODEL", "")
+        translator = OllamaTranslator(
+            base_url=base_url,
+            model=resolved_model if resolved_model else None,
+        )
+        def gen_ollama():
+            try:
+                for tok in translator.stream_translate_one(req.text, req.source_lang, req.target_lang):
+                    yield tok
+            except Exception as e:
+                yield f"\n[error: {e}]"
+        return StreamingResponse(gen_ollama(), media_type="text/plain; charset=utf-8")
+
+    if req.provider == "nllb":
+        size = req.nllb_model_size or settings.get("nllb_model_size", "600M")
+        translator = _get_nllb_translator(size)
+        def gen_nllb():
+            try:
+                for tok in translator.stream_translate_one(req.text, req.source_lang, req.target_lang):
+                    yield tok
+            except Exception as e:
+                yield f"\n[error: {e}]"
+        return StreamingResponse(gen_nllb(), media_type="text/plain; charset=utf-8")
+
+    # Fallback for Claude / Hy-MT2: non-streamed, wrap result in single chunk
+    try:
+        translator = _make_translator(
+            req.provider, settings, model=req.model,
+            hymt2_model_size=req.hymt2_model_size, nllb_model_size=req.nllb_model_size,
+        )
+        result = translator.translate([{"text": req.text}], req.source_lang, req.target_lang)
+        text = result[0]["text"] if result else ""
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    return StreamingResponse(iter([text]), media_type="text/plain; charset=utf-8")
+
+
+@app.post("/translate/prewarm")
+def translate_prewarm(req: TranslateOneRequest):
+    """Pre-load translator model so first real translation isn't a cold start.
+
+    Returns immediately on best-effort failure (model not pulled, Ollama down).
+    """
+    settings = load_settings()
+    if req.provider == "ollama":
+        base_url = settings.get("ollama_url", "http://localhost:11434")
+        resolved_model = req.model or settings.get("ollama_model", "") or os.environ.get("OLLAMA_MODEL", "")
+        translator = OllamaTranslator(
+            base_url=base_url,
+            model=resolved_model if resolved_model else None,
+        )
+        ok = translator.warmup()
+        return {"ok": True, "warmed": ok, "model": translator.model}
+    if req.provider == "nllb":
+        size = req.nllb_model_size or settings.get("nllb_model_size", "600M")
+        translator = _get_nllb_translator(size)
+        ok = translator.warmup()
+        return {"ok": True, "warmed": ok, "model": translator.model_id, "device": translator._device}
+    return {"ok": True, "warmed": False}
+
+
 @app.post("/translate/one")
 def translate_one(req: TranslateOneRequest):
     """Translate a single segment synchronously (for per-row re-translate)."""
     settings = load_settings()
-
-    kwargs = {}
-    if req.provider == "claude":
-        kwargs["api_key"] = settings.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
-    elif req.provider == "hymt2":
-        resolved_size = req.hymt2_model_size or settings.get("hymt2_model_size", "1.8B")
-        kwargs["model_size"] = resolved_size
-    else:
-        kwargs["base_url"] = settings.get("ollama_url", "http://localhost:11434")
-        resolved_model = req.model or settings.get("ollama_model", "") or os.environ.get("OLLAMA_MODEL", "")
-        if resolved_model:
-            kwargs["model"] = resolved_model
-
     try:
-        translator = get_translator(provider=req.provider, **kwargs)
+        translator = _make_translator(
+            req.provider, settings, model=req.model,
+            hymt2_model_size=req.hymt2_model_size, nllb_model_size=req.nllb_model_size,
+        )
         result = translator.translate(
             [{"text": req.text}], req.source_lang, req.target_lang,
         )
@@ -1044,6 +1166,99 @@ def hymt2_download(req: HyMT2DownloadRequest):
     if hymt2_download_progress.get("status") == "downloading":
         return {"status": "already_downloading"}
     thread = threading.Thread(target=_run_hymt2_download, args=(model_size,), daemon=True)
+    thread.start()
+    return {"status": "started", "model_size": model_size}
+
+
+# ── NLLB-200 status & download ──
+
+nllb_download_progress = {"status": "idle", "progress": 0.0, "detail": ""}
+
+@app.get("/nllb/status")
+def nllb_status(model_size: str = "600M"):
+    downloaded = NLLBTranslator.is_downloaded(model_size)
+    model_id = NLLBTranslator.MODELS.get(model_size, model_size)
+    return {
+        "model_size": model_size,
+        "model_id": model_id,
+        "downloaded": downloaded,
+        "download_progress": nllb_download_progress,
+    }
+
+
+def _run_nllb_download(model_size: str):
+    global nllb_download_progress
+    size_label = "~2.4GB" if model_size == "600M" else "~5GB"
+    nllb_download_progress = {
+        "status": "downloading", "progress": 0.1,
+        "detail": f"Downloading NLLB-200 {model_size} ({size_label})...",
+    }
+    try:
+        import sys
+        model_id = NLLBTranslator.MODELS.get(model_size, NLLBTranslator.MODELS["600M"])
+        cache_dir = NLLBTranslator.CACHE_DIR
+        os.makedirs(cache_dir, exist_ok=True)
+        bundled = getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None) is not None
+
+        def _is_benign_symlink_error(stderr_or_msg: str) -> bool:
+            return ("WinError 1314" in stderr_or_msg
+                    or "privilege is not held" in stderr_or_msg
+                    or "symlink" in stderr_or_msg.lower())
+
+        if bundled:
+            from huggingface_hub import snapshot_download
+            try:
+                snapshot_download(
+                    repo_id=model_id,
+                    cache_dir=cache_dir,
+                    ignore_patterns=["*.bin"],
+                )
+            except OSError as oe:
+                # On Windows without Developer Mode / admin, HF Hub fails when
+                # creating symlinks from snapshots → blobs. Model weights are
+                # usually already downloaded; verify via is_downloaded.
+                if _is_benign_symlink_error(str(oe)) and NLLBTranslator.is_downloaded(model_size):
+                    pass  # benign — model files are present
+                else:
+                    raise
+            nllb_download_progress = {"status": "done", "progress": 1.0,
+                                       "detail": f"NLLB-200 {model_size} ready"}
+        else:
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 f"from huggingface_hub import snapshot_download; "
+                 f"snapshot_download(repo_id='{model_id}', cache_dir=r'{cache_dir}', ignore_patterns=['*.bin']);"
+                 f"print('done')"],
+                capture_output=True, text=True, timeout=3600,
+            )
+            if result.returncode == 0:
+                nllb_download_progress = {"status": "done", "progress": 1.0,
+                                           "detail": f"NLLB-200 {model_size} ready"}
+            elif _is_benign_symlink_error(result.stderr or "") and NLLBTranslator.is_downloaded(model_size):
+                # Windows symlink permission failure but weights are present
+                nllb_download_progress = {"status": "done", "progress": 1.0,
+                                           "detail": f"NLLB-200 {model_size} ready (symlinks skipped)"}
+            else:
+                nllb_download_progress = {"status": "error", "progress": 0.0,
+                                           "detail": result.stderr[-500:] or "Download failed"}
+    except subprocess.TimeoutExpired:
+        nllb_download_progress = {"status": "error", "progress": 0.0,
+                                   "detail": "Timeout after 1 hour"}
+    except Exception as e:
+        nllb_download_progress = {"status": "error", "progress": 0.0, "detail": str(e)}
+
+
+class NLLBDownloadRequest(BaseModel):
+    model_size: str = "600M"
+
+@app.post("/nllb/download")
+def nllb_download(req: NLLBDownloadRequest):
+    model_size = req.model_size
+    if model_size not in NLLBTranslator.MODELS:
+        return JSONResponse(status_code=400, content={"error": f"Invalid model_size. Choose from: {list(NLLBTranslator.MODELS)}"})
+    if nllb_download_progress.get("status") == "downloading":
+        return {"status": "already_downloading"}
+    thread = threading.Thread(target=_run_nllb_download, args=(model_size,), daemon=True)
     thread.start()
     return {"status": "started", "model_size": model_size}
 
@@ -2538,80 +2753,124 @@ def apply_cuts_keyboard(req: ApplyCutsRequest):
     }
 
 
-# ── Live Transcription (WebSocket) — Growing Buffer + VAD ──
+# ── Live Transcription (WebSocket) — LocalAgreement-2 + Sliding Window ──
 #
-# Architecture (modeled after YouTube Live Captions / Google Meet):
+# Architecture (modeled after YouTube Live Captions / Whisper-Streaming):
 #
-#   Browser ──[100ms PCM chunks]──► WebSocket ──► GrowingBuffer
+#   Browser ──[~42ms PCM chunks]──► WebSocket ──► sliding audio window
 #                                                      │
-#                                              webrtcvad (speech/silence)
+#                                              webrtcvad (pause/resume only)
 #                                                      │
-#                                    ┌─── speech ──► buffer grows
-#                                    │
-#                                    ├─── every ~1s ──► Whisper(buffer) ──► partial result
-#                                    │
-#                                    └─── silence 500ms ──► Whisper(buffer) ──► final result
-#                                                          buffer resets
+#                                    Every ~0.5-1s ──► Whisper(window) ──► word list
+#                                                      │
+#                                    LocalAgreement-2: commit words that appear
+#                                    in TWO consecutive hypotheses at same position
+#                                                      │
+#                              ┌─── commit words → trim window from start
+#                              │                     keep ~0.8s overlap for context
+#                              │
+#                              └─── flush sentence when:
+#                                     • ≥6 committed words, OR
+#                                     • hard punctuation (.!?), OR
+#                                     • silence ≥ 500ms
 #
 #   Frontend receives:
-#     { type: "partial", text: "..." }         ← updates in real-time
-#     { type: "final", index: N, segment: {} } ← locked, added to list
+#     { type: "partial", text: "..." }         ← hypothesis tail (flickers, light text)
+#     { type: "final_segment", segment: {} }   ← committed sentence (locked, bold)
 #
 
 
 class LiveStreamProcessor:
-    """Real-time transcription with growing buffer + VAD + partial/final results.
+    """Real-time transcription using LocalAgreement-2 + sliding window.
 
-    How it works:
-    1. Audio arrives as small PCM chunks (~100ms) from WebSocket
-    2. webrtcvad detects speech vs silence on each 30ms frame
-    3. While speech is detected, audio accumulates in a growing buffer
-    4. Every ~1 second during speech, Whisper transcribes the FULL buffer → partial result
-    5. When VAD detects silence (500ms pause), Whisper runs one final time → final result
-    6. Buffer resets for the next utterance
-    7. Partial results update in-place; final results are locked and numbered
+    Key ideas (YouTube-style):
+    - The audio buffer is a SLIDING WINDOW (max ~12s), not a growing utterance.
+    - On each partial cycle, Whisper re-decodes the window → produces a word list.
+    - LocalAgreement-2: a word is COMMITTED only when two consecutive hypotheses
+      agree on it at the same position (with small timestamp tolerance).
+    - After committing, the audio buffer is TRIMMED from the start (keeping a
+      small overlap), so the next decode is fast and latency stays constant.
+    - Committed words feed a sentence buffer; we emit final_segment when the
+      sentence is "closed" (punctuation, length cap, or silence).
     """
 
-    FRAME_MS = 30           # VAD frame size in ms (10, 20, or 30)
+    FRAME_MS = 30
     SAMPLE_RATE = 16000
-    BYTES_PER_SAMPLE = 2    # 16-bit PCM
-    FRAME_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * FRAME_MS // 1000  # 960 bytes per 30ms
+    BYTES_PER_SAMPLE = 2
+    FRAME_BYTES = SAMPLE_RATE * BYTES_PER_SAMPLE * FRAME_MS // 1000  # 960
 
-    SILENCE_THRESHOLD_MS = 400   # ms of silence to finalize utterance
-    MIN_SPEECH_MS = 250          # minimum speech to start processing
-    MAX_BUFFER_S = 15            # force finalize after 15s to keep segments short
+    SILENCE_THRESHOLD_MS = 350    # silence to flush pending sentence (lower → end-of-sentence detected sooner)
+    MIN_SPEECH_MS = 200           # minimum speech to start a new utterance
+    MAX_WINDOW_S = 12.0           # sliding window cap; force-commit if exceeded
+    TRIM_OVERLAP_S = 0.8          # audio kept after last committed word
 
-    # Partial interval adapts to model size — heavier models need more time
+    # Partials are cheap now (window stays short) — keep cadence tight.
+    # On a fast GPU (RTX 30/40-series), Whisper Turbo decodes a 6s window in
+    # ~200ms; we can afford a 0.4s cycle and still leave headroom.
     PARTIAL_INTERVALS = {
-        "tiny": 0.8, "base": 1.0, "small": 1.5,
-        "medium": 2.5, "large-v3-turbo": 3.0, "large-v3": 4.0,
+        "tiny": 0.3, "base": 0.4, "small": 0.5,
+        "medium": 0.8, "large-v3-turbo": 0.4, "large-v3": 1.0,
     }
+
+    SENTENCE_MAX_WORDS = 10
+    SENTENCE_MIN_WORDS_FOR_SOFT_PUNCT = 4
+    HARD_PUNCT = ".!?。？！"
+    SOFT_PUNCT = ",;，；:"
+    INITIAL_PROMPT_TAIL_CHARS = 200
+
+    # Emit a "draft_segment" event whenever the committed prefix changes (even
+    # just one word). The frontend uses these for two purposes:
+    #   1. Display the committed-but-unflushed text immediately (so users see
+    #      stable words right after they're committed, not only at sentence end)
+    #   2. Pre-translate when text grows past its own threshold (frontend-gated)
+    # De-dup is by text content (_last_draft_text), so cadence is naturally
+    # ~one emit per newly committed word.
+    DRAFT_MIN_WORDS = 1
+
+    # ── Confidence-based early commit ──────────────────────────────────────
+    # LocalAgreement-2 normally needs two consecutive Whisper passes to agree
+    # on a word before we commit it (≥1 partial cycle of latency floor). For
+    # words Whisper is confident about AND that sit before the buffer end (so
+    # they have right-context), skip the second pass and commit on first
+    # detection. Trade-off: rare possibility of wrong commit when Whisper is
+    # confident but wrong on first pass.
+    HIGH_CONFIDENCE_THRESHOLD = 0.80
+    # Min seconds between word end and buffer end to consider the word "settled"
+    # (i.e. Whisper has enough following audio that it's unlikely to revise it).
+    CONFIDENT_COMMIT_TAIL_SECONDS = 0.3
 
     def __init__(self, model: str = "base", language: str | None = None,
                  time_offset: float = 0.0, vad_aggressiveness: int = 2):
         import webrtcvad
-        self.vad = webrtcvad.Vad(vad_aggressiveness)  # 0=least, 3=most aggressive
+        self.vad = webrtcvad.Vad(vad_aggressiveness)
         self.model = model
         self.language = language
         self.time_offset = time_offset
-        self._partial_interval = self.PARTIAL_INTERVALS.get(model, 2.0)
+        self._partial_interval = self.PARTIAL_INTERVALS.get(model, 0.8)
 
-        # Audio state
-        self._incoming = bytearray()      # raw incoming bytes (may not be frame-aligned)
-        self._speech_buffer = bytearray() # growing buffer of current utterance
+        # Audio
+        self._incoming = bytearray()
+        self._speech_buffer = bytearray()
+        self._buffer_start_time = 0.0  # absolute timeline of buffer[0]
         self._is_speaking = False
-        self._silence_frames = 0          # consecutive silence frames
-        self._speech_frames = 0           # consecutive speech frames
-        self._total_received = 0          # total bytes received (for timeline)
+        self._silence_frames = 0
+        self._speech_frames = 0
+        self._total_received = 0
+        self._pending_silence_flush = False
 
-        # Transcription state
+        # LocalAgreement state (timestamps RELATIVE to buffer)
+        self._prev_hypothesis: list[dict] = []
+
+        # Committed state (timestamps ABSOLUTE on session timeline)
+        self._pending_sentence: list[dict] = []  # committed words awaiting sentence flush
+        self._committed_session_text = ""        # rolling tail for initial_prompt
+        self._finalized: list[dict] = []
+
+        # Last draft text emitted (for de-dup so the frontend isn't spammed)
+        self._last_draft_text = ""
+
         self._last_partial_time = 0.0
-        self._partial_text = ""           # current partial text
-        self._committed_text = ""         # text already emitted as final_segment during partial
-        self._finalized: list[dict] = []  # list of finalized segments
-        self._segment_start_time = 0.0    # when current utterance started (seconds)
 
-        # Whisper
         self._transcriber = None
         self.running = False
         self._lock = threading.Lock()
@@ -2623,38 +2882,87 @@ class LiveStreamProcessor:
 
     @property
     def current_time(self) -> float:
-        """Current timeline position in seconds."""
         return self.time_offset + self._total_received / (self.SAMPLE_RATE * self.BYTES_PER_SAMPLE)
 
-    @staticmethod
-    def _is_hallucination(text: str) -> bool:
-        """Detect Whisper hallucinations (repetitive words, nonsense)."""
+    @property
+    def _buffer_duration(self) -> float:
+        return len(self._speech_buffer) / (self.SAMPLE_RATE * self.BYTES_PER_SAMPLE)
+
+    # Phrases Whisper "imagines" on silence/noise (memorized from YouTube training data).
+    # Substring match, case-insensitive, on the joined word list.
+    _HALLUCINATION_PHRASES = (
+        # Vietnamese YouTube intros/outros
+        "ghiền mì gõ",
+        "đăng ký kênh",
+        "subscribe cho kênh",
+        "nhấn chuông thông báo",
+        "cảm ơn các bạn đã xem",
+        "hẹn gặp lại các bạn",
+        "đừng quên like",
+        "đừng quên đăng ký",
+        # English Whisper hallucinations
+        "thanks for watching",
+        "thank you for watching",
+        "subscribe to my channel",
+        "see you next time",
+        "see you in the next video",
+        "don't forget to subscribe",
+        "like and subscribe",
+        # Music / bracket tokens
+        "[music]", "[applause]", "[laughter]", "♪", "♫",
+        # Japanese / Korean common hallucinations
+        "ご視聴ありがとうございました",
+        "字幕",
+        "다음 영상에서",
+    )
+
+    AVG_PROB_THRESHOLD = 0.35   # below this, suspect hallucination
+    MIN_PROB_FRACTION = 0.5     # at least this fraction of words must clear AVG_PROB_THRESHOLD
+
+    @classmethod
+    def _is_hallucination_words(cls, words: list[dict]) -> bool:
+        """Detect Whisper hallucinations: repetition loops, low confidence, blacklist phrases."""
         from collections import Counter
-        words = text.lower().strip().split()
-        if len(words) < 4:
+        if not words:
             return False
-        counts = Counter(words)
-        _, top_count = counts.most_common(1)[0]
-        if top_count / len(words) > 0.55 and len(words) > 5:
-            return True
-        if len(words) >= 6:
-            bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
-            bg_counts = Counter(bigrams)
-            _, bg_max = bg_counts.most_common(1)[0]
-            if bg_max / len(bigrams) > 0.45:
+        # Probability-based: avg word prob too low → likely silent audio
+        probs = [float(w.get("probability") or 0.0) for w in words]
+        if probs:
+            avg = sum(probs) / len(probs)
+            if avg < cls.AVG_PROB_THRESHOLD:
                 return True
+        # Blacklist phrases (substring match)
+        joined = " ".join(w["word"].strip() for w in words if w.get("word")).lower()
+        for phrase in cls._HALLUCINATION_PHRASES:
+            if phrase in joined:
+                return True
+        # Repetition loops
+        toks = [w["word"].lower().strip(".,!?;:、，。") for w in words if w.get("word")]
+        if len(toks) >= 5:
+            counts = Counter(toks)
+            _, top = counts.most_common(1)[0]
+            if top / len(toks) > 0.55:
+                return True
+            if len(toks) >= 6:
+                bigrams = [f"{toks[i]} {toks[i+1]}" for i in range(len(toks) - 1)]
+                bc = Counter(bigrams).most_common(1)[0][1]
+                if bc / len(bigrams) > 0.45:
+                    return True
         return False
 
+    # ── Audio ingestion (non-blocking) ──
+
     def ingest_audio(self, pcm_bytes: bytes) -> str | None:
-        """Fast: buffer audio + run VAD. Returns action needed: 'partial', 'finalize', or None.
-        This is NON-BLOCKING — no transcription happens here."""
+        """Buffer audio + run VAD. Returns 'partial', 'finalize', or None.
+
+        Never blocks on transcription — that runs in an executor.
+        """
         with self._lock:
             self._incoming.extend(pcm_bytes)
             self._total_received += len(pcm_bytes)
 
         action_needed = None
 
-        # Process in 30ms frames
         while len(self._incoming) >= self.FRAME_BYTES:
             frame = bytes(self._incoming[:self.FRAME_BYTES])
             del self._incoming[:self.FRAME_BYTES]
@@ -2670,42 +2978,55 @@ class LiveStreamProcessor:
 
                 if not self._is_speaking and self._speech_frames >= (self.MIN_SPEECH_MS // self.FRAME_MS):
                     self._is_speaking = True
-                    self._segment_start_time = self.current_time - (self._speech_frames * self.FRAME_MS / 1000.0)
+                    # Buffer starts roughly when speech started
+                    if not self._speech_buffer:
+                        self._buffer_start_time = self.current_time - (
+                            self._speech_frames * self.FRAME_MS / 1000.0
+                        )
 
                 if self._is_speaking:
                     self._speech_buffer.extend(frame)
-
-                    buffer_duration = len(self._speech_buffer) / (self.SAMPLE_RATE * self.BYTES_PER_SAMPLE)
-                    if buffer_duration >= self.MAX_BUFFER_S:
+                    if self._buffer_duration >= self.MAX_WINDOW_S:
                         action_needed = "finalize"
                     elif _time_module.time() - self._last_partial_time >= self._partial_interval:
-                        if len(self._speech_buffer) >= self.SAMPLE_RATE * self.BYTES_PER_SAMPLE:
+                        if self._buffer_duration >= 0.6:
                             action_needed = "partial"
             else:
                 self._speech_frames = 0
                 self._silence_frames += 1
 
                 if self._is_speaking:
+                    # Keep a bit of trailing silence in the buffer for context
                     self._speech_buffer.extend(frame)
                     silence_ms = self._silence_frames * self.FRAME_MS
                     if silence_ms >= self.SILENCE_THRESHOLD_MS:
                         action_needed = "finalize"
+                        self._pending_silence_flush = True
 
         return action_needed
 
+    # ── Inference + commit (runs in executor) ──
+
     def do_transcription(self, action: str) -> list[dict]:
-        """Slow: run transcription (partial or finalize). Call from executor."""
-        if action == "partial":
-            return self._do_partial()
-        elif action == "finalize":
-            return self._finalize()
+        try:
+            if action == "partial":
+                return self._do_partial()
+            elif action == "finalize":
+                return self._do_finalize()
+        except Exception as e:
+            print(f"[live] do_transcription({action}) error: {e}")
         return []
 
-    def _transcribe_buffer(self) -> str:
-        """Transcribe current speech buffer with Whisper. Returns text."""
-        if len(self._speech_buffer) < self.SAMPLE_RATE:  # < 0.5s
-            return ""
+    def _initial_prompt(self) -> str | None:
+        tail = self._committed_session_text.strip()
+        if not tail:
+            return None
+        return tail[-self.INITIAL_PROMPT_TAIL_CHARS:]
 
+    def _run_inference(self) -> list[dict]:
+        """Decode current buffer → list of words with RELATIVE timestamps."""
+        if self._buffer_duration < 0.4:
+            return []
         self._ensure_transcriber()
         tmp_path = os.path.join(UPLOAD_DIR, f"_live_{id(self)}.wav")
         try:
@@ -2714,197 +3035,273 @@ class LiveStreamProcessor:
                 wf.setsampwidth(2)
                 wf.setframerate(self.SAMPLE_RATE)
                 wf.writeframes(bytes(self._speech_buffer))
-
-            segments = self._transcriber.transcribe(tmp_path, language=self.language)
-            # Combine all segment texts
-            text = " ".join(seg["text"].strip() for seg in segments if seg["text"].strip())
-            return text
+            words = self._transcriber.transcribe_buffer(
+                tmp_path,
+                language=self.language,
+                initial_prompt=self._initial_prompt(),
+            )
+            return words
         except Exception as e:
-            print(f"[live] Transcription error: {e}")
-            return ""
+            print(f"[live] inference error: {e}")
+            return []
         finally:
             try:
                 os.remove(tmp_path)
-            except:
+            except OSError:
                 pass
 
-    def _do_partial(self) -> list[dict]:
-        """Run partial transcription on growing buffer.
+    @staticmethod
+    def _word_key(w: dict) -> str:
+        return (w.get("word") or "").strip().lower().strip(".,!?;:、，。？！；：")
 
-        Key improvement: if the partial text contains completed sentences
-        (ending with .!?;,), those are emitted as final_segment events
-        immediately. Only the incomplete tail remains as a partial.
-        """
-        import re
-        self._last_partial_time = _time_module.time()
-        text = self._transcribe_buffer()
-        if not text or self._is_hallucination(text):
-            return []
+    def _agreement_prefix_len(self, prev: list[dict], curr: list[dict]) -> int:
+        """Number of leading words in `curr` that agree with `prev` by token+timestamp."""
+        n = 0
+        for p, c in zip(prev, curr):
+            if self._word_key(p) != self._word_key(c):
+                break
+            # Timestamps should be within ~400ms — generous for VAD drift
+            if abs(p["start"] - c["start"]) > 0.5:
+                break
+            n += 1
+        return n
 
-        events = []
-        buffer_duration = len(self._speech_buffer) / (self.SAMPLE_RATE * self.BYTES_PER_SAMPLE)
+    def _trim_buffer_to(self, time_relative: float):
+        """Cut audio from buffer start to `time_relative` (seconds), aligned to frame."""
+        if time_relative <= 0:
+            return
+        cut_bytes = int(time_relative * self.SAMPLE_RATE * self.BYTES_PER_SAMPLE)
+        cut_bytes -= cut_bytes % self.FRAME_BYTES
+        if cut_bytes <= 0 or cut_bytes >= len(self._speech_buffer):
+            return
+        cut_seconds = cut_bytes / (self.SAMPLE_RATE * self.BYTES_PER_SAMPLE)
+        del self._speech_buffer[:cut_bytes]
+        self._buffer_start_time += cut_seconds
+        # Shift any remaining hypothesis words so they stay relative to new buffer start
+        for w in self._prev_hypothesis:
+            w["start"] = max(0.0, w["start"] - cut_seconds)
+            w["end"] = max(0.0, w["end"] - cut_seconds)
 
-        # Check for completed sentences in the text
-        # Find the last sentence-ending punctuation followed by a space or end
-        sentence_end_pattern = re.compile(r'(.*[.!?;。？！])\s+(.*)', re.DOTALL)
-        match = sentence_end_pattern.match(text)
-
-        if match and len(self._committed_text) < len(match.group(1)):
-            completed_part = match.group(1).strip()
-            remaining_part = match.group(2).strip()
-
-            # Extract only the NEW completed sentences (not already committed)
-            new_text = completed_part[len(self._committed_text):].strip()
-            if new_text:
-                # Split new completed text into individual sentences
-                sentences = self._split_sentences(new_text)
-
-                # Calculate time for committed sentences
-                committed_ratio = len(self._committed_text) / len(text) if len(text) > 0 else 0
-                new_ratio = len(new_text) / len(text) if len(text) > 0 else 0
-
-                seg_start_base = self._segment_start_time + buffer_duration * committed_ratio
-                new_duration = buffer_duration * new_ratio
-
-                total_new_chars = sum(len(s) for s in sentences)
-                char_offset = 0
-
-                for sent in sentences:
-                    ratio = len(sent) / total_new_chars if total_new_chars > 0 else 1.0
-                    seg_start = seg_start_base + new_duration * (char_offset / total_new_chars) if total_new_chars > 0 else seg_start_base
-                    seg_end = seg_start + new_duration * ratio
-                    char_offset += len(sent)
-
-                    segment = {
-                        "start": round(seg_start, 2),
-                        "end": round(seg_end, 2),
-                        "text": sent,
-                        "language": self.language,
-                        "type": "speech",
-                    }
-                    self._finalized.append(segment)
-                    events.append({
-                        "type": "final_segment",
-                        "segment": segment,
-                        "index": len(self._finalized) - 1,
-                    })
-
-                # Update committed text tracker
-                self._committed_text = completed_part
-
-            # Send remaining incomplete text as partial
-            if remaining_part:
-                self._partial_text = remaining_part
-                events.append({
-                    "type": "partial",
-                    "text": remaining_part,
-                    "start": round(self._segment_start_time + buffer_duration * len(completed_part) / len(text), 2),
-                    "duration": round(buffer_duration * len(remaining_part) / len(text), 1),
-                })
-            else:
-                self._partial_text = ""
-        else:
-            # No completed sentence yet — just update partial
-            # Strip already-committed text from partial display
-            display_text = text[len(self._committed_text):].strip() if self._committed_text else text
-            if display_text:
-                self._partial_text = display_text
-                events.append({
-                    "type": "partial",
-                    "text": display_text,
-                    "start": round(self._segment_start_time, 2),
-                    "duration": round(buffer_duration, 1),
-                })
-
-        return events
+    def _absolutize(self, w: dict) -> dict:
+        return {
+            "word": w["word"],
+            "start": round(self._buffer_start_time + w["start"], 3),
+            "end": round(self._buffer_start_time + w["end"], 3),
+            "probability": w.get("probability", 0.0),
+        }
 
     @staticmethod
-    def _split_sentences(text: str) -> list[str]:
-        """Split text by sentence punctuation for shorter, more readable segments."""
-        import re
-        # Split by sentence-ending punctuation (.!?), semicolons, and commas
-        # followed by a space — keep punctuation attached to the sentence
-        parts = re.split(r'(?<=[.!?;,。？！，；])\s+', text.strip())
-        # Filter empty and merge very short fragments (< 3 words) with previous
-        result = []
-        for p in parts:
-            p = p.strip()
-            if not p:
-                continue
-            if result and len(p.split()) < 3:
-                result[-1] = result[-1] + " " + p
-            else:
-                result.append(p)
-        return result if result else [text.strip()]
+    def _compose_text(words: list[dict]) -> str:
+        """Join word fragments into a clean sentence."""
+        return "".join(
+            (w["word"] if w["word"].startswith((" ", "'", "’", ",", ".", "!", "?", ":", ";"))
+             else " " + w["word"])
+            for w in words
+        ).strip()
 
-    def _finalize(self) -> list[dict]:
-        """Finalize remaining uncommitted text on silence.
+    def _maybe_emit_draft(self) -> dict | None:
+        """Emit a draft_segment event with the current committed-but-unflushed text,
+        so the frontend can start translating before the sentence closes.
 
-        Sentences already committed during _do_partial() are NOT re-emitted.
-        Only the trailing incomplete text gets finalized here.
+        Only emits when ≥DRAFT_MIN_WORDS committed AND text has changed since
+        the last draft (de-dup).
         """
-        text = self._transcribe_buffer()
-        end_time = self.current_time
-        start_time = self._segment_start_time
-        duration = end_time - start_time
+        if len(self._pending_sentence) < self.DRAFT_MIN_WORDS:
+            return None
+        text = self._compose_text(self._pending_sentence)
+        if not text or text == self._last_draft_text:
+            return None
+        self._last_draft_text = text
+        return {
+            "type": "draft_segment",
+            "text": text,
+            "start": round(self._pending_sentence[0]["start"], 2),
+            "end": round(self._pending_sentence[-1]["end"], 2),
+            # Index of the upcoming final_segment so frontend can pair them
+            "next_index": len(self._finalized),
+        }
 
-        # Reset state
-        committed = self._committed_text
-        self._speech_buffer.clear()
-        self._is_speaking = False
-        self._silence_frames = 0
-        self._speech_frames = 0
-        self._partial_text = ""
-        self._committed_text = ""
-        self._last_partial_time = _time_module.time()
+    def _flush_sentence(self, force: bool = False) -> list[dict]:
+        """Emit final_segment(s) from _pending_sentence according to closing rules."""
+        events: list[dict] = []
+        if not self._pending_sentence:
+            return events
 
-        if not text or self._is_hallucination(text):
-            return []
-
-        # Only finalize the part NOT already committed during partials
-        remaining = text[len(committed):].strip() if committed else text.strip()
-        if not remaining:
-            return []
-
-        # Split remaining into sentences
-        sentences = self._split_sentences(remaining)
-        events = []
-
-        # Time offset: committed text took up the first portion
-        committed_ratio = len(committed) / len(text) if len(text) > 0 else 0
-        remaining_duration = duration * (1.0 - committed_ratio)
-        remaining_start = start_time + duration * committed_ratio
-
-        total_chars = sum(len(s) for s in sentences)
-        char_offset = 0
-
-        for sent in sentences:
-            ratio = len(sent) / total_chars if total_chars > 0 else 1.0 / len(sentences)
-            seg_start = remaining_start + remaining_duration * (char_offset / total_chars) if total_chars > 0 else remaining_start
-            seg_end = seg_start + remaining_duration * ratio
-            char_offset += len(sent)
-
+        def emit(words: list[dict]):
+            if not words:
+                return
+            text = self._compose_text(words)
+            if not text:
+                return
             segment = {
-                "start": round(seg_start, 2),
-                "end": round(seg_end, 2),
-                "text": sent,
+                "start": round(words[0]["start"], 2),
+                "end": round(words[-1]["end"], 2),
+                "text": text,
                 "language": self.language,
                 "type": "speech",
             }
             self._finalized.append(segment)
+            # Keep rolling tail for next initial_prompt
+            self._committed_session_text = (self._committed_session_text + " " + text)[
+                -self.INITIAL_PROMPT_TAIL_CHARS * 2:
+            ]
+            # Sentence closed — reset draft so the next sentence starts fresh
+            self._last_draft_text = ""
             events.append({
                 "type": "final_segment",
                 "segment": segment,
                 "index": len(self._finalized) - 1,
             })
 
+        # Scan committed buffer; cut at each closing boundary
+        bucket: list[dict] = []
+        for w in self._pending_sentence:
+            bucket.append(w)
+            last_char = w["word"].strip()[-1:] if w["word"].strip() else ""
+            if last_char in self.HARD_PUNCT:
+                emit(bucket)
+                bucket = []
+            elif last_char in self.SOFT_PUNCT and len(bucket) >= self.SENTENCE_MIN_WORDS_FOR_SOFT_PUNCT:
+                emit(bucket)
+                bucket = []
+            elif len(bucket) >= self.SENTENCE_MAX_WORDS:
+                emit(bucket)
+                bucket = []
+
+        if force:
+            emit(bucket)
+            bucket = []
+
+        self._pending_sentence = bucket
+        return events
+
+    def _do_partial(self) -> list[dict]:
+        """One partial cycle: re-decode window → LocalAgreement → commit → trim."""
+        self._last_partial_time = _time_module.time()
+        words = self._run_inference()
+        if not words:
+            return []
+        if self._is_hallucination_words(words):
+            return []
+
+        events: list[dict] = []
+
+        # LocalAgreement-2: commit prefix that matches previous hypothesis
+        commit_n = self._agreement_prefix_len(self._prev_hypothesis, words)
+
+        # Extend the commit prefix with high-confidence words that already have
+        # enough right-context — saves one full partial cycle of latency on
+        # words Whisper is sure about. Only continues from where LocalAgreement
+        # left off (we never skip past an uncertain word).
+        buffer_dur = self._buffer_duration
+        while commit_n < len(words):
+            w = words[commit_n]
+            prob = float(w.get("probability") or 0.0)
+            word_end = float(w.get("end") or 0.0)
+            tail = buffer_dur - word_end
+            if prob >= self.HIGH_CONFIDENCE_THRESHOLD and tail >= self.CONFIDENT_COMMIT_TAIL_SECONDS:
+                commit_n += 1
+            else:
+                break
+
+        if commit_n > 0:
+            committed = [self._absolutize(w) for w in words[:commit_n]]
+            self._pending_sentence.extend(committed)
+
+            # Trim audio up to last committed word end (minus small overlap)
+            last_end_rel = words[commit_n - 1]["end"]
+            trim_to = max(0.0, last_end_rel - self.TRIM_OVERLAP_S)
+            self._trim_buffer_to(trim_to)
+
+            # Recompute hypothesis tail (relative to NEW buffer after trim)
+            shifted_tail = []
+            for w in words[commit_n:]:
+                shifted_tail.append({
+                    "word": w["word"],
+                    "start": max(0.0, w["start"] - trim_to),
+                    "end": max(0.0, w["end"] - trim_to),
+                    "probability": w.get("probability", 0.0),
+                })
+            self._prev_hypothesis = shifted_tail
+
+            events.extend(self._flush_sentence(force=False))
+        else:
+            self._prev_hypothesis = words
+
+        # Force-trim if window has grown past MAX_WINDOW_S without commits
+        if self._buffer_duration >= self.MAX_WINDOW_S and not commit_n:
+            # Force-commit current hypothesis prefix (best effort) to keep latency bounded
+            if words:
+                committed = [self._absolutize(w) for w in words]
+                self._pending_sentence.extend(committed)
+                self._committed_session_text = (
+                    self._committed_session_text
+                    + " "
+                    + " ".join(w["word"].strip() for w in committed)
+                )[-self.INITIAL_PROMPT_TAIL_CHARS * 2:]
+                self._speech_buffer.clear()
+                self._buffer_start_time = self.current_time
+                self._prev_hypothesis = []
+                events.extend(self._flush_sentence(force=False))
+
+        # Emit draft of current committed-but-unflushed sentence so frontend
+        # can start translating before sentence boundary fires. De-duplicated
+        # by _last_draft_text inside _maybe_emit_draft.
+        draft_event = self._maybe_emit_draft()
+        if draft_event:
+            events.append(draft_event)
+
+        # Emit hypothesis tail as partial text
+        tail_text = " ".join(w["word"].strip() for w in self._prev_hypothesis).strip()
+        if tail_text:
+            events.append({
+                "type": "partial",
+                "text": tail_text,
+                "start": round(self._buffer_start_time, 2),
+                "duration": round(self._buffer_duration, 1),
+            })
+        elif not events:
+            # Send empty partial so frontend clears stale hypothesis
+            events.append({"type": "partial", "text": "",
+                           "start": round(self._buffer_start_time, 2), "duration": 0.0})
+
+        return events
+
+    def _do_finalize(self) -> list[dict]:
+        """Utterance closed (silence or max-window): commit ALL remaining words + flush."""
+        events: list[dict] = []
+        words = self._run_inference()
+
+        if words and not self._is_hallucination_words(words):
+            committed = [self._absolutize(w) for w in words]
+            self._pending_sentence.extend(committed)
+
+        # Reset audio + hypothesis state
+        self._speech_buffer.clear()
+        self._buffer_start_time = self.current_time
+        self._prev_hypothesis = []
+        self._is_speaking = False
+        self._silence_frames = 0
+        self._speech_frames = 0
+        self._pending_silence_flush = False
+        self._last_draft_text = ""
+        self._last_partial_time = _time_module.time()
+
+        events.extend(self._flush_sentence(force=True))
+
+        # Always send empty partial to clear the live line
+        events.append({"type": "partial", "text": "",
+                       "start": round(self.current_time, 2), "duration": 0.0})
         return events
 
     def flush(self) -> list[dict]:
-        """Process any remaining buffer on stop."""
-        if self._is_speaking and len(self._speech_buffer) >= self.SAMPLE_RATE:
-            return self._finalize()
-        return []
+        """Called on stop: drain any in-flight buffer + pending sentence."""
+        events: list[dict] = []
+        if self._is_speaking and self._buffer_duration >= 0.4:
+            events.extend(self._do_finalize())
+        else:
+            events.extend(self._flush_sentence(force=True))
+        return events
 
     @property
     def segments(self) -> list[dict]:

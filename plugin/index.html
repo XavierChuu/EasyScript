@@ -47,7 +47,7 @@
       </div>
     </div>
 
-    <!-- Action Buttons -->
+    <!-- Action Buttons + status (model info + progress always visible below) -->
     <div class="section">
       <div class="section-body action-buttons">
         <button class="btn btn-primary btn-action" id="autoCutBtn" disabled title="Detect silence & breath segments using ffmpeg">
@@ -60,9 +60,45 @@
           Speakers
         </button>
       </div>
+      <!-- Always-visible status: which model is loaded + which device (GPU/CPU) -->
+      <div class="action-status">
+        <div class="model-info" id="modelInfo"></div>
+      </div>
+    </div>
 
-      <!-- Transcribe Settings (inline under buttons) -->
-      <div class="settings-inline" id="transcribeSettingsSection">
+    <!-- Progress (always visible when a task is running) -->
+    <div class="progress-container hidden" id="progressContainer">
+      <div class="progress-header">
+        <span class="progress-stage" id="progressStage">Preparing...</span>
+        <span class="progress-percent" id="progressPercent">0%</span>
+        <button class="btn-progress-cancel" id="progressCancelBtn" title="Cancel">✕</button>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <div class="progress-footer">
+        <span class="progress-elapsed" id="progressElapsed">0:00</span>
+        <span class="progress-eta" id="progressEta"></span>
+      </div>
+    </div>
+
+    <!-- Standalone toggle (outside Settings, always visible) -->
+    <div class="action-extra-row">
+      <label class="checkbox-row" id="diarizeCheckRow">
+        <input type="checkbox" id="includeSpeakersCheck" />
+        <span class="checkbox-label">Identify speakers after transcribe</span>
+      </label>
+    </div>
+
+    <!-- Settings (single collapsible — Transcribe + Speakers + Translation) -->
+    <div class="section" id="settingsSection">
+      <div class="section-header clickable" id="settingsToggle">
+        <span class="section-label">Settings</span>
+        <span class="section-count" id="settingsChevron">&#9654;</span>
+      </div>
+      <div class="section-body hidden" id="settingsBody">
+        <!-- Transcribe subsection -->
+        <div class="settings-subsection-label">Transcribe</div>
         <div class="select-row">
           <div class="select-col">
             <label class="input-label">Model</label>
@@ -123,26 +159,89 @@
             </select>
           </div>
         </div>
-        <div class="model-info" id="modelInfo"></div>
-        <label class="checkbox-row" id="diarizeCheckRow">
-          <input type="checkbox" id="includeSpeakersCheck" />
-          <span class="checkbox-label">Identify speakers after transcribe</span>
-        </label>
-      </div>
 
-      <!-- Progress -->
-      <div class="progress-container hidden" id="progressContainer">
-        <div class="progress-header">
-          <span class="progress-stage" id="progressStage">Preparing...</span>
-          <span class="progress-percent" id="progressPercent">0%</span>
-          <button class="btn-progress-cancel" id="progressCancelBtn" title="Cancel">✕</button>
+        <!-- Speakers subsection -->
+        <div class="settings-subsection-label" style="margin-top:12px">Speakers</div>
+        <div class="control-row">
+          <label class="control-label">HF Token</label>
+          <input type="password" class="input-text" id="hfTokenInput" placeholder="hf_..." style="flex:1" />
         </div>
-        <div class="progress-bar">
-          <div class="progress-fill" id="progressFill"></div>
+        <div class="settings-hint">Required for speaker diarization. <a href="https://huggingface.co/settings/tokens" target="_blank" style="color:var(--accent)">Get token</a></div>
+        <div class="control-row mt-6">
+          <label class="control-label" title="Skip pyannote's cluster-size search → 1.5-3× faster. Leave 0 to auto-detect.">Known speakers</label>
+          <input type="number" class="input-text" id="knownSpeakersInput" min="0" max="20" value="0" step="1" style="width:60px" />
+          <span class="settings-hint" style="font-size:11px">0 = auto</span>
         </div>
-        <div class="progress-footer">
-          <span class="progress-elapsed" id="progressElapsed">0:00</span>
-          <span class="progress-eta" id="progressEta"></span>
+        <div class="control-row mt-6">
+          <label class="control-label" title="Standard = fewer speakers (merge similar voices). Sensitive = pyannote stock. Maximum = aggressively keep small clusters.">Sensitivity</label>
+          <select class="input-select" id="speakerSensitivitySelect" style="flex:1">
+            <option value="standard" selected>Standard — fewer speakers</option>
+            <option value="sensitive">Sensitive — pyannote default</option>
+            <option value="max">Maximum — catch very brief</option>
+          </select>
+        </div>
+
+        <!-- Translation subsection -->
+        <div class="settings-subsection-label" style="margin-top:12px">Translation</div>
+        <div class="control-row">
+          <label class="control-label">Provider</label>
+          <select class="input-select" id="translationProvider" style="flex:1">
+            <option value="nllb">NLLB-200 (Local, fast)</option>
+            <option value="ollama">Ollama (Local)</option>
+            <option value="hymt2">Hy-MT2 (Local)</option>
+            <option value="claude">Claude API (Cloud)</option>
+          </select>
+        </div>
+        <!-- Ollama settings -->
+        <div id="ollamaSettings">
+          <div class="control-row mt-6" id="ollamaUrlRow">
+            <label class="control-label">Ollama URL</label>
+            <input type="text" class="input-text" id="ollamaUrlInput" placeholder="http://localhost:11434" value="http://localhost:11434" style="flex:1" />
+          </div>
+          <div class="control-row mt-6" id="ollamaModelRow">
+            <label class="control-label">Model</label>
+            <select class="input-select" id="ollamaModelSelect" style="flex:1">
+              <option value="">Loading models...</option>
+            </select>
+            <button class="btn btn-xs" id="refreshOllamaModelsBtn" title="Refresh" style="margin-left:4px">↻</button>
+          </div>
+        </div>
+        <!-- Hy-MT2 settings -->
+        <div id="hymt2Settings" class="hidden">
+          <div class="control-row mt-6">
+            <label class="control-label">Model size</label>
+            <select class="input-select" id="hymt2ModelSize" style="flex:1">
+              <option value="1.8B">1.8B — fast (~3GB VRAM)</option>
+              <option value="7B">7B — more accurate (~14GB VRAM)</option>
+            </select>
+          </div>
+          <div class="control-row mt-6" id="hymt2StatusRow">
+            <span class="settings-hint" id="hymt2StatusText">Not downloaded</span>
+            <button class="btn btn-xs btn-primary" id="hymt2DownloadBtn" style="margin-left:auto">Download</button>
+          </div>
+        </div>
+        <!-- NLLB-200 settings -->
+        <div id="nllbSettings" class="hidden">
+          <div class="control-row mt-6">
+            <label class="control-label">Model size</label>
+            <select class="input-select" id="nllbModelSize" style="flex:1">
+              <option value="600M">600M — fast (~2.4GB)</option>
+              <option value="1.3B">1.3B — better quality (~5GB)</option>
+            </select>
+          </div>
+          <div class="control-row mt-6" id="nllbStatusRow">
+            <span class="settings-hint" id="nllbStatusText">Not downloaded</span>
+            <button class="btn btn-xs btn-primary" id="nllbDownloadBtn" style="margin-left:auto">Download</button>
+          </div>
+        </div>
+        <!-- Claude settings -->
+        <div class="control-row mt-6 hidden" id="claudeKeyRow">
+          <label class="control-label">API Key</label>
+          <input type="password" class="input-text" id="claudeApiKeyInput" placeholder="sk-ant-..." style="flex:1" />
+        </div>
+
+        <div class="btn-row mt-8">
+          <button class="btn btn-primary btn-block" id="saveSettingsBtn">Save Settings</button>
         </div>
       </div>
     </div>
@@ -332,65 +431,6 @@
       </div>
     </div>
 
-    <!-- Settings -->
-    <div class="section" id="settingsSection">
-      <div class="section-header clickable" id="settingsToggle">
-        <span class="section-label">Settings</span>
-        <span class="section-count" id="settingsChevron">&#9654;</span>
-      </div>
-      <div class="section-body hidden" id="settingsBody">
-        <div class="control-row">
-          <label class="control-label">HF Token</label>
-          <input type="password" class="input-text" id="hfTokenInput" placeholder="hf_..." style="flex:1" />
-        </div>
-        <div class="settings-hint">Required for speaker diarization. <a href="https://huggingface.co/settings/tokens" target="_blank" style="color:var(--accent)">Get token</a></div>
-        <div class="control-row mt-8">
-          <label class="control-label">Translation</label>
-          <select class="input-select" id="translationProvider" style="flex:1">
-            <option value="ollama">Ollama (Local)</option>
-            <option value="hymt2">Hy-MT2 (Local)</option>
-            <option value="claude">Claude API (Cloud)</option>
-          </select>
-        </div>
-        <!-- Ollama settings -->
-        <div id="ollamaSettings">
-          <div class="control-row mt-6" id="ollamaUrlRow">
-            <label class="control-label">Ollama URL</label>
-            <input type="text" class="input-text" id="ollamaUrlInput" placeholder="http://localhost:11434" value="http://localhost:11434" style="flex:1" />
-          </div>
-          <div class="control-row mt-6" id="ollamaModelRow">
-            <label class="control-label">Model</label>
-            <select class="input-select" id="ollamaModelSelect" style="flex:1">
-              <option value="">Loading models...</option>
-            </select>
-            <button class="btn btn-xs" id="refreshOllamaModelsBtn" title="Refresh" style="margin-left:4px">↻</button>
-          </div>
-        </div>
-        <!-- Hy-MT2 settings -->
-        <div id="hymt2Settings" class="hidden">
-          <div class="control-row mt-6">
-            <label class="control-label">Model size</label>
-            <select class="input-select" id="hymt2ModelSize" style="flex:1">
-              <option value="1.8B">1.8B — fast (~3GB VRAM)</option>
-              <option value="7B">7B — more accurate (~14GB VRAM)</option>
-            </select>
-          </div>
-          <div class="control-row mt-6" id="hymt2StatusRow">
-            <span class="settings-hint" id="hymt2StatusText">Not downloaded</span>
-            <button class="btn btn-xs btn-primary" id="hymt2DownloadBtn" style="margin-left:auto">Download</button>
-          </div>
-        </div>
-        <!-- Claude settings -->
-        <div class="control-row mt-6 hidden" id="claudeKeyRow">
-          <label class="control-label">API Key</label>
-          <input type="password" class="input-text" id="claudeApiKeyInput" placeholder="sk-ant-..." style="flex:1" />
-        </div>
-        <div class="btn-row mt-8">
-          <button class="btn btn-primary btn-block" id="saveSettingsBtn">Save Settings</button>
-        </div>
-      </div>
-    </div>
-
   </div>
 
   <!-- ==================== LIVE TAB ==================== -->
@@ -486,6 +526,7 @@
                 </select>
               </div>
             </div>
+            <div class="model-info" id="liveModelInfo"></div>
           </div>
         </div>
       </div>
@@ -592,10 +633,11 @@
           <label class="control-label">HF Token</label>
           <input type="password" class="input-text" id="liveHfTokenInput" placeholder="hf_..." style="flex:1" />
         </div>
-        <div class="settings-hint">Required for speaker identification.</div>
+        <div class="settings-hint">Required for speaker identification. <a href="https://huggingface.co/settings/tokens" target="_blank" style="color:var(--accent)">Get token</a></div>
         <div class="control-row mt-8">
           <label class="control-label">Translation</label>
           <select class="input-select" id="liveTransProvider" style="flex:1">
+            <option value="nllb">NLLB-200 (Local, fast)</option>
             <option value="ollama">Ollama (Local)</option>
             <option value="hymt2">Hy-MT2 (Local)</option>
             <option value="claude">Claude API (Cloud)</option>
@@ -612,7 +654,9 @@
             <select class="input-select" id="liveOllamaModelSelect" style="flex:1">
               <option value="">Loading models...</option>
             </select>
+            <button class="btn btn-xs" id="liveRefreshOllamaModelsBtn" title="Refresh" style="margin-left:4px">↻</button>
           </div>
+          <div class="settings-hint">Tip: smaller models (qwen2.5:3b, gemma3:1b, llama3.2:3b) translate faster in live mode.</div>
         </div>
         <!-- Live Hy-MT2 settings -->
         <div id="liveHymt2Settings" class="hidden">
@@ -623,8 +667,23 @@
               <option value="7B">7B — more accurate (~14GB VRAM)</option>
             </select>
           </div>
-          <div class="control-row mt-6">
+          <div class="control-row mt-6" id="liveHymt2StatusRow">
             <span class="settings-hint" id="liveHymt2StatusText">Not downloaded</span>
+            <button class="btn btn-xs btn-primary" id="liveHymt2DownloadBtn" style="margin-left:auto">Download</button>
+          </div>
+        </div>
+        <!-- Live NLLB-200 settings -->
+        <div id="liveNllbSettings" class="hidden">
+          <div class="control-row mt-6">
+            <label class="control-label">Model size</label>
+            <select class="input-select" id="liveNllbModelSize" style="flex:1">
+              <option value="600M">600M — fast (~2.4GB)</option>
+              <option value="1.3B">1.3B — better quality (~5GB)</option>
+            </select>
+          </div>
+          <div class="control-row mt-6" id="liveNllbStatusRow">
+            <span class="settings-hint" id="liveNllbStatusText">Not downloaded</span>
+            <button class="btn btn-xs btn-primary" id="liveNllbDownloadBtn" style="margin-left:auto">Download</button>
           </div>
         </div>
         <!-- Live Claude settings -->

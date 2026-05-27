@@ -600,6 +600,26 @@ body {
   padding: 0 4px;
 }
 
+/* Subsection labels inside Settings (Transcribe / Speakers / Translation) */
+.settings-subsection-label {
+  font-size: 10px;
+  font-weight: var(--weight-w650);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+/* Always-visible status under the action buttons — indent so it's not flush
+   with the panel edge. */
+.action-status {
+  padding: 0 var(--space-10);
+}
+.action-extra-row {
+  padding: 0 var(--space-10);
+  margin-top: var(--space-6);
+}
+
 .model-info {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -1286,7 +1306,9 @@ body {
    Segment list
    ============================================================ */
 .segment-list {
-  max-height: 260px;
+  /* Was 260px — bumped so segments occupy more of the panel. Falls back
+     to a fraction of viewport so it adapts to taller windows. */
+  max-height: min(560px, calc(100vh - 320px));
   overflow-y: auto;
   margin-top: var(--space-8);
   padding-right: 4px;
@@ -1896,6 +1918,19 @@ body {
   color: var(--accent);
   opacity: 0.9;
   font-style: italic;
+}
+/* Committed-but-unflushed draft — stable, won't retract */
+.live-draft {
+  color: var(--text-primary);
+  font-style: normal;
+  font-weight: var(--weight-w650);
+  opacity: 1;
+}
+/* Hypothesis tail — may shift word-by-word as Whisper re-decodes */
+.live-hypothesis {
+  color: var(--accent);
+  font-style: italic;
+  opacity: 0.85;
 }
 .live-partial-item {
   border-left: 2px solid var(--accent);

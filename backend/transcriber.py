@@ -481,6 +481,87 @@ class Transcriber:
 
         return results
 
+    # ── Live mode: fast word-level path ──
+
+    def transcribe_buffer(self, audio_path, language=None, initial_prompt=None):
+        """Transcribe a short audio buffer for live streaming.
+
+        Returns a flat list of words: [{word, start, end, probability}] with
+        timestamps relative to the buffer (0 = buffer start). No hallucination
+        filtering — caller (LiveStreamProcessor) handles that.
+
+        Designed for buffers ≤ ~15s; bypasses chunking + segment-level filters.
+        """
+        if self.backend == "mlx":
+            return self._mlx_transcribe_buffer(audio_path, language, initial_prompt)
+        return self._fw_transcribe_buffer(audio_path, language, initial_prompt)
+
+    # Segment-level filter thresholds (live mode — looser than batch mode)
+    _LIVE_NO_SPEECH_THRESH = 0.55
+    _LIVE_AVG_LOGPROB_THRESH = -1.0
+
+    def _fw_transcribe_buffer(self, audio_path, language, initial_prompt):
+        fw_opts = dict(
+            language=language,
+            beam_size=1,
+            word_timestamps=True,
+            vad_filter=False,
+            condition_on_previous_text=False,
+        )
+        if initial_prompt:
+            fw_opts["initial_prompt"] = initial_prompt
+        segments_iter, _info = self.model.transcribe(audio_path, **fw_opts)
+        words = []
+        for seg in segments_iter:
+            # Whisper hallucinates phrases like "Hãy subscribe...", "Thank you for
+            # watching", "[Music]" on silence/noise. Skip whole segment when
+            # confidence is low.
+            no_speech = float(getattr(seg, "no_speech_prob", 0.0) or 0.0)
+            avg_lp = float(getattr(seg, "avg_logprob", 0.0) or 0.0)
+            if no_speech > self._LIVE_NO_SPEECH_THRESH or avg_lp < self._LIVE_AVG_LOGPROB_THRESH:
+                continue
+            for w in (seg.words or []):
+                txt = (w.word or "").strip()
+                if not txt:
+                    continue
+                words.append({
+                    "word": txt,
+                    "start": round(float(w.start), 3),
+                    "end": round(float(w.end), 3),
+                    "probability": round(float(w.probability), 3),
+                })
+        return words
+
+    def _mlx_transcribe_buffer(self, audio_path, language, initial_prompt):
+        import mlx_whisper
+        opts = {
+            "path_or_hf_repo": self._mlx_repo,
+            "word_timestamps": True,
+            "condition_on_previous_text": False,
+        }
+        if language:
+            opts["language"] = language
+        if initial_prompt:
+            opts["initial_prompt"] = initial_prompt
+        result = mlx_whisper.transcribe(audio_path, **opts)
+        words = []
+        for seg in result.get("segments", []):
+            no_speech = float(seg.get("no_speech_prob") or 0.0)
+            avg_lp = float(seg.get("avg_logprob") or 0.0)
+            if no_speech > self._LIVE_NO_SPEECH_THRESH or avg_lp < self._LIVE_AVG_LOGPROB_THRESH:
+                continue
+            for w in seg.get("words", []):
+                txt = (w.get("word") or "").strip()
+                if not txt:
+                    continue
+                words.append({
+                    "word": txt,
+                    "start": round(float(w["start"]), 3),
+                    "end": round(float(w["end"]), 3),
+                    "probability": round(float(w.get("probability", 0.0)), 3),
+                })
+        return words
+
     # ── Utility ──
 
     @staticmethod

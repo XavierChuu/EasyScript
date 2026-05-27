@@ -83,6 +83,9 @@ document.getElementById("modelSelect")?.addEventListener("change", () => {
   updateModelInfo(null);
 });
 
+// (Speaker params now live in the collapsible Settings section and are
+// always visible; no checkbox-gated show/hide needed.)
+
 function setConnected(connected) {
   backendConnected = connected;
   const badge = document.getElementById("statusBadge");
@@ -2603,9 +2606,35 @@ function splitAndAssignSpeakers(diarizeRaw) {
       continue;
     }
 
-    // Split the text proportionally among sub-segments
-    const words = (seg.text || "").split(/\s+/).filter(w => w);
+    // ── Guard against pyannote boundary slipping mid-sentence ─────────────
+    // pyannote's turn boundaries aren't word-precise. If Whisper produced
+    // ONE segment for ONE sentence ("When do we get to fight this guy?")
+    // but the turn boundary lands 0.2s into it, splitting proportionally
+    // gives "When" → A, rest → B. That's almost always wrong: Whisper's
+    // own sentence boundary is more trustworthy than pyannote's word
+    // alignment. Only split if EVERY sub-segment is substantial — at
+    // least MIN_SUB_DURATION AND at least MIN_SUB_FRACTION of the parent.
+    // Otherwise, attribute the whole sentence to the dominant speaker.
     const segDuration = seg.end - seg.start;
+    const MIN_SUB_DURATION = 1.0;   // seconds
+    const MIN_SUB_FRACTION = 0.25;  // 25% of parent segment
+    const groupSpan = (g) => Math.min(g.end, seg.end) - Math.max(g.start, seg.start);
+    const everySubstantial = groups.every(g => {
+      const span = groupSpan(g);
+      return span >= MIN_SUB_DURATION && span >= segDuration * MIN_SUB_FRACTION;
+    });
+
+    if (!everySubstantial) {
+      const dominant = groups.reduce((best, g) =>
+        groupSpan(g) > groupSpan(best) ? g : best, groups[0]);
+      seg.speaker = dominant.speaker;
+      seg.speakerLabel = speakerMap[dominant.speaker] || "Unknown";
+      newSegments.push(seg);
+      continue;
+    }
+
+    // Both/all sides are substantial → safe to split proportionally.
+    const words = (seg.text || "").split(/\s+/).filter(w => w);
 
     for (let g = 0; g < groups.length; g++) {
       const grp = groups[g];
@@ -2613,8 +2642,6 @@ function splitAndAssignSpeakers(diarizeRaw) {
       const subStart = Math.max(grp.start, seg.start);
       const subEnd = Math.min(grp.end, seg.end);
       if (subEnd <= subStart) continue;
-
-      const subDuration = subEnd - subStart;
 
       // Distribute words proportionally by duration
       const startRatio = (subStart - seg.start) / segDuration;
@@ -2647,6 +2674,11 @@ function round3(n) { return Math.round(n * 1000) / 1000; }
  */
 async function startDiarizeBackend(audioPath) {
   const speechSegs = segments.filter(s => s.type === "speech");
+  // Optional known-speaker hint — speeds pyannote up noticeably (skips
+  // cluster-size search). 0 / empty = auto-detect.
+  const knownInput = parseInt(document.getElementById("knownSpeakersInput")?.value ?? "0", 10);
+  const numSpeakers = Number.isFinite(knownInput) && knownInput > 0 ? knownInput : null;
+  const sensitivity = document.getElementById("speakerSensitivitySelect")?.value || "standard";
   await fetchBackend("/diarize", {
     method: "POST",
     body: JSON.stringify({
@@ -2655,6 +2687,8 @@ async function startDiarizeBackend(audioPath) {
         start: s.start, end: s.end, text: s.text,
         language: s.language, type: s.type,
       })),
+      num_speakers: numSpeakers,
+      sensitivity: sensitivity,
     }),
   });
 }
@@ -3033,6 +3067,7 @@ function initSettings() {
     chevron.innerHTML = isOpen ? "&#9654;" : "&#9660;";
   });
 
+
   // Toggle export section
   document.getElementById("exportToggle").addEventListener("click", () => {
     const body = document.getElementById("exportBody");
@@ -3046,11 +3081,14 @@ function initSettings() {
   function updateProviderUI(provider) {
     const isOllama = provider === "ollama";
     const isHyMT2 = provider === "hymt2";
+    const isNLLB = provider === "nllb";
     const isClaude = provider === "claude";
     document.getElementById("ollamaSettings")?.classList.toggle("hidden", !isOllama);
     document.getElementById("hymt2Settings")?.classList.toggle("hidden", !isHyMT2);
+    document.getElementById("nllbSettings")?.classList.toggle("hidden", !isNLLB);
     document.getElementById("claudeKeyRow")?.classList.toggle("hidden", !isClaude);
     if (isHyMT2) refreshHyMT2Status();
+    if (isNLLB) refreshNLLBStatus();
   }
 
   const providerSelect = document.getElementById("translationProvider");
@@ -3065,6 +3103,46 @@ function initSettings() {
 
   // Hy-MT2 size change → refresh status
   document.getElementById("hymt2ModelSize")?.addEventListener("change", refreshHyMT2Status);
+  // NLLB size change → refresh status
+  document.getElementById("nllbModelSize")?.addEventListener("change", refreshNLLBStatus);
+
+  // NLLB download button — same flow as Hy-MT2
+  document.getElementById("nllbDownloadBtn")?.addEventListener("click", async () => {
+    const btn = document.getElementById("nllbDownloadBtn");
+    const statusText = document.getElementById("nllbStatusText");
+    const size = document.getElementById("nllbModelSize")?.value || "600M";
+    btn.disabled = true;
+    btn.textContent = "Downloading...";
+    statusText.textContent = "Downloading model — this may take several minutes...";
+    statusText.style.color = "";
+    try {
+      await fetchBackend("/nllb/download", {
+        method: "POST",
+        body: JSON.stringify({ model_size: size }),
+      });
+      let polling = true;
+      while (polling) {
+        await new Promise(r => setTimeout(r, 3000));
+        const data = await fetchBackend(`/nllb/status?model_size=${size}`);
+        const dlp = data.download_progress || {};
+        if (data.downloaded || dlp.status === "done") {
+          statusText.textContent = `✓ ${data.model_id} ready`;
+          statusText.style.color = "var(--accent)";
+          polling = false;
+        } else if (dlp.status === "error") {
+          statusText.textContent = `Error: ${dlp.detail || "download failed"}`;
+          polling = false;
+        } else if (dlp.detail) {
+          statusText.textContent = dlp.detail;
+        }
+      }
+    } catch (err) {
+      statusText.textContent = `Error: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Re-download";
+    }
+  });
 
   // Hy-MT2 download button
   document.getElementById("hymt2DownloadBtn")?.addEventListener("click", async () => {
@@ -3113,6 +3191,7 @@ function initSettings() {
       ollama_url: document.getElementById("ollamaUrlInput")?.value.trim() || "http://localhost:11434",
       ollama_model: document.getElementById("ollamaModelSelect")?.value || "",
       hymt2_model_size: document.getElementById("hymt2ModelSize")?.value || "1.8B",
+      nllb_model_size: document.getElementById("nllbModelSize")?.value || "600M",
       anthropic_api_key: document.getElementById("claudeApiKeyInput")?.value.trim() || "",
     };
 
@@ -3153,6 +3232,10 @@ async function loadSavedSettings() {
     if (settings.hymt2_model_size) {
       const sizeEl = document.getElementById("hymt2ModelSize");
       if (sizeEl) sizeEl.value = settings.hymt2_model_size;
+    }
+    if (settings.nllb_model_size) {
+      const sizeEl = document.getElementById("nllbModelSize");
+      if (sizeEl) sizeEl.value = settings.nllb_model_size;
     }
     // Populate Ollama models, then restore saved selection
     await refreshOllamaModels(settings.ollama_model);
@@ -3198,6 +3281,29 @@ async function refreshHyMT2Status() {
   const size = document.getElementById("hymt2ModelSize")?.value || "1.8B";
   try {
     const data = await fetchBackend(`/hymt2/status?model_size=${size}`);
+    if (data.downloaded) {
+      statusText.textContent = `✓ ${data.model_id} ready`;
+      statusText.style.color = "var(--accent)";
+      downloadBtn.textContent = "Re-download";
+    } else {
+      statusText.textContent = `Not downloaded — ${data.model_id}`;
+      statusText.style.color = "";
+      downloadBtn.textContent = "Download";
+    }
+  } catch {
+    statusText.textContent = "Status check failed";
+    statusText.style.color = "";
+  }
+}
+
+async function refreshNLLBStatus() {
+  const statusText = document.getElementById("nllbStatusText");
+  const downloadBtn = document.getElementById("nllbDownloadBtn");
+  if (!statusText || !downloadBtn) return;
+
+  const size = document.getElementById("nllbModelSize")?.value || "600M";
+  try {
+    const data = await fetchBackend(`/nllb/status?model_size=${size}`);
     if (data.downloaded) {
       statusText.textContent = `✓ ${data.model_id} ready`;
       statusText.style.color = "var(--accent)";
@@ -3442,12 +3548,58 @@ function initLiveTab() {
   let liveTransLangs = [];     // max 2 translation languages
   let liveActiveTransLang = "";
   let liveTextView = false;
-  let livePartialText = "";   // current partial (updating) text
+  // ── Live in-progress line state ──
+  // The user sees ONE growing string in the live-partial row. It's the
+  // concatenation of the committed draft (from backend) and the latest
+  // hypothesis tail. We typewriter-animate the COMBINED text, not the parts
+  // separately, so that when the backend promotes words from hypothesis →
+  // draft the visible text doesn't briefly retract and re-type.
+  let liveDraftText = "";        // committed-but-unflushed text from backend
+  let liveDraftNextIndex = -1;   // segment index this draft will become
+  let liveHypothesisText = "";   // latest hypothesis tail from backend
+  let liveDisplayedText = "";    // what the user currently sees (typewriter output)
+  let liveDisplayedTarget = "";  // draft + " " + hypothesis (animation goal)
+  let liveDisplayTimer = null;
+  // Backend emits draft_segment + partial as separate WS events in the same
+  // cycle. If we recompute the target between them, we see a stale-hypothesis
+  // moment that briefly duplicates the just-committed word. Debounce so both
+  // events update state before a single recompute fires.
+  let liveRecomputeTimer = null;
+  const RECOMPUTE_DEBOUNCE_MS = 10;
   const MAX_LIVE_TRANS_LANGS = 2;
+  // Adaptive typewriter cadence: reveal new words spread across the actual
+  // backend partial interval so the on-screen pace tracks the speaker. Fixed
+  // 80ms/word felt jerky — too fast for slow speech, dumps in chunks for fast
+  // speech. We measure interval-between-recomputes and divide by the new
+  // word count, clamped to a readable range.
+  const CADENCE_MIN_MS = 120;     // very fast speech cap
+  const CADENCE_MAX_MS = 350;     // slow speech cap (readable floor)
+  const CADENCE_DEFAULT_MS = 200; // before we have a measurement
+  let liveCadenceMs = CADENCE_DEFAULT_MS;
+  let liveLastRecomputeAt = 0;
+
+  // Display mode for the in-progress line:
+  //   false → committed-only (LocalAgreement-2 commits). +1–2s latency,
+  //           but words never retract — feels like YouTube's no-flicker
+  //           captions.
+  //   true  → include the hypothesis tail. Lower latency, but Whisper may
+  //           revise the tail between cycles → visible flicker.
+  const LIVE_SHOW_HYPOTHESIS = false;
+
+  // When final_segment fires while the typewriter is still mid-sentence, we
+  // queue the push and let typewriter finish revealing the full final text
+  // first — avoids an abrupt snap-to-end visual.
+  let livePendingFinal = null; // { seg, draftText, draftIdx }
 
   // Translation state
   let liveTranslations = {};  // { langCode: { segIndex: "translated text" } }
   let liveTransQueue = [];     // queue of segments awaiting translation
+  // Pre-translation cache for draft sentences. When a draft_segment matches
+  // the eventual final_segment text, we can reuse the cached translation and
+  // avoid waiting for a fresh round-trip.
+  let liveDraftTranslations = {}; // { langCode: { nextIndex: "translation" } }
+  let liveDraftSourceTexts = {};  // { nextIndex: "source text being pre-translated" }
+  let liveDraftAborters = {};     // { "langCode:nextIndex": AbortController }
 
   // Elements
   const startBtn = document.getElementById("liveStartBtn");
@@ -3532,7 +3684,7 @@ function initLiveTab() {
     const countEl = document.getElementById("liveSegmentCount");
     if (!list) return;
 
-    const hasContent = liveSegments.length > 0 || livePartialText;
+    const hasContent = liveSegments.length > 0 || liveDisplayedText;
 
     if (!hasContent) {
       list.innerHTML = '<div class="segment-empty">Select an input source and press Start</div>';
@@ -3602,10 +3754,33 @@ function initLiveTab() {
     } else {
       // ── SPEECH VIEW ──
       // Fast transcription display, newest first, no translation
+      // The "in-progress" line is the monotonically growing typewriter buffer
+      // (liveDisplayedText). The prefix that backend has already committed is
+      // styled as draft (bold); the tail past that — still hypothesis — is
+      // italic. The split is by character length, since liveDisplayedText is
+      // built from liveDraftText + " " + liveHypothesisText.
+      const total = liveDisplayedText || "";
+      const hasInProgress = !!total;
+      let inProgressInner = "";
+      if (total) {
+        const draftLen = liveDraftText ? liveDraftText.length : 0;
+        if (draftLen > 0 && total.startsWith(liveDraftText)) {
+          const draftPart = total.slice(0, draftLen);
+          const tailPart = total.slice(draftLen);
+          inProgressInner = `<span class="live-draft">${draftPart}</span>`
+            + (tailPart ? `<span class="live-hypothesis">${tailPart}</span>` : "");
+        } else if (draftLen > 0 && total.length < draftLen) {
+          // Typewriter hasn't caught up to the full draft yet — style as draft.
+          inProgressInner = `<span class="live-draft">${total}</span>`;
+        } else {
+          inProgressInner = `<span class="live-hypothesis">${total}</span>`;
+        }
+      }
+
       if (liveTextView) {
         let html = '';
-        if (livePartialText) {
-          html += '<div class="live-text-line live-partial">' + livePartialText + '</div>';
+        if (hasInProgress) {
+          html += `<div class="live-text-line live-partial">${inProgressInner}</div>`;
         }
         for (let i = liveSegments.length - 1; i >= 0; i--) {
           html += `<div class="live-text-line live-speech-text" data-seg-idx="${i}">${liveSegments[i].text || ""}</div>`;
@@ -3613,12 +3788,12 @@ function initLiveTab() {
         list.innerHTML = html;
       } else {
         let html = '';
-        if (livePartialText) {
+        if (hasInProgress) {
           html += `<div class="segment-item live-partial-item">
             <div class="segment-header">
               <span class="segment-time live-partial-label">● live</span>
             </div>
-            <div class="segment-text live-partial">${livePartialText}</div>
+            <div class="segment-text live-partial">${inProgressInner}</div>
           </div>`;
         }
         for (let i = liveSegments.length - 1; i >= 0; i--) {
@@ -3827,35 +4002,56 @@ function initLiveTab() {
         setLiveStatus(`Listening — model: ${data.model}, lang: ${data.language}`);
 
       } else if (data.type === "partial") {
-        // Live updating text — show partial at the bottom
-        livePartialText = data.text || "";
-        renderLiveSegments();
+        // Hypothesis tail updated — only feed it into the display if we
+        // explicitly opted in. Default (LIVE_SHOW_HYPOTHESIS=false) hides
+        // the flickering tail and shows only committed words.
+        if (LIVE_SHOW_HYPOTHESIS) {
+          setLiveHypothesis(data.text || "");
+        }
         setLiveStatus(`Listening... ${liveSegments.length} segments`);
 
-      } else if (data.type === "final_segment") {
-        // Finalized segment — add to list, clear partial
-        const seg = data.segment;
-        if (seg && seg.text) {
-          liveSegments.push(seg);
-          livePartialText = "";
-          renderLiveSegments();
-          setLiveStatus(`${liveSegments.length} segments`);
-
-          // Trigger realtime translation for each active language
-          const segIdx = liveSegments.length - 1;
+      } else if (data.type === "draft_segment") {
+        // Committed prefix changed — same combined typewriter buffer, but
+        // also kick off pre-translation when there's enough text.
+        const draftText = data.text || "";
+        const nextIdx = typeof data.next_index === "number" ? data.next_index : -1;
+        setLiveDraft(draftText, nextIdx);
+        const draftWordCount = draftText ? draftText.trim().split(/\s+/).length : 0;
+        if (nextIdx >= 0 && draftWordCount >= 4) {
           liveTransLangs.forEach(langCode => {
-            translateLiveSegment(segIdx, seg.text, langCode);
+            preTranslateDraft(nextIdx, draftText, langCode);
           });
+        }
+
+      } else if (data.type === "final_segment") {
+        // If typewriter is mid-reveal, queue the push and let it finish
+        // typing the full final text before the segment hops into the list.
+        const seg = data.segment;
+        if (!seg || !seg.text) { /* nothing to do */ }
+        else if (liveDisplayedText && liveDisplayedText !== seg.text) {
+          livePendingFinal = {
+            seg,
+            draftText: liveDraftText,
+            draftIdx: liveDraftNextIndex,
+          };
+          // Treat the full sentence as committed so typewriter has something
+          // concrete to advance toward (backend may have committed words
+          // during finalize that didn't reach our local draft state).
+          liveDraftText = seg.text;
+          liveDraftNextIndex = -1;
+          liveHypothesisText = "";
+          scheduleRecompute();
+          setLiveStatus(`Finishing sentence…`);
+        } else {
+          pushFinalSegment(seg, liveDraftText, liveDraftNextIndex);
         }
 
       } else if (data.type === "stopped") {
         // Session ended — merge any remaining
         const finalSegs = data.segments || [];
-        // Replace current session segments with final list
         const prevSegs = liveSegments.filter(s => s._prev);
         liveSegments = [...prevSegs, ...finalSegs];
-        livePartialText = "";
-        renderLiveSegments();
+        clearLiveDisplay();
         setLiveStatus(`Paused — ${liveSegments.length} segments`);
 
       } else if (data.type === "error") {
@@ -3925,17 +4121,251 @@ function initLiveTab() {
     livePanel.classList.remove("live-focus");
   }
 
+  // ── Typewriter on the combined live line ──
+  // We animate the COMBINED text (draft + hypothesis), not the parts in
+  // isolation. When the backend promotes a word from hypothesis → draft, the
+  // combined target text doesn't change, so the typewriter just keeps going
+  // and there's no visible re-type. Only when Whisper actually revises the
+  // hypothesis (the words change, not just where they're stored) do we apply
+  // a single edit at the divergence point.
+  function setLiveHypothesis(text) {
+    liveHypothesisText = text || "";
+    scheduleRecompute();
+  }
+
+  function setLiveDraft(text, nextIndex) {
+    liveDraftText = text || "";
+    liveDraftNextIndex = (typeof nextIndex === "number") ? nextIndex : liveDraftNextIndex;
+    scheduleRecompute();
+  }
+
+  function scheduleRecompute() {
+    if (liveRecomputeTimer !== null) return;
+    liveRecomputeTimer = setTimeout(() => {
+      liveRecomputeTimer = null;
+      recomputeDisplayedTarget();
+    }, RECOMPUTE_DEBOUNCE_MS);
+  }
+
+  function clearLiveDisplay() {
+    if (liveRecomputeTimer !== null) {
+      clearTimeout(liveRecomputeTimer);
+      liveRecomputeTimer = null;
+    }
+    liveDraftText = "";
+    liveDraftNextIndex = -1;
+    liveHypothesisText = "";
+    liveDisplayedText = "";
+    liveDisplayedTarget = "";
+    liveLastRecomputeAt = 0;
+    liveCadenceMs = CADENCE_DEFAULT_MS;
+    livePendingFinal = null;
+    stopDisplayAnim();
+    renderLiveSegments();
+  }
+
+  function recomputeDisplayedTarget() {
+    // Smart-join draft + hypothesis with exactly one space between, trimming
+    // any whitespace at the seam so we don't get double spaces.
+    let target = "";
+    if (liveDraftText && liveHypothesisText) {
+      target = liveDraftText.replace(/\s+$/, "") + " " + liveHypothesisText.replace(/^\s+/, "");
+    } else {
+      target = liveDraftText || liveHypothesisText || "";
+    }
+    liveDisplayedTarget = target;
+
+    if (!target) {
+      liveDisplayedText = "";
+      stopDisplayAnim();
+      liveLastRecomputeAt = 0;
+      renderLiveSegments();
+      return;
+    }
+
+    if (!target.startsWith(liveDisplayedText)) {
+      // Target diverged from what's displayed — either Whisper revised the
+      // hypothesis or the committed draft shifted. Find the longest common
+      // word-prefix and snap displayed back to it (single edit, NOT a
+      // per-word re-type). The animation then resumes forward.
+      const tWords = target.split(/\s+/);
+      const dWords = liveDisplayedText.split(/\s+/);
+      let i = 0;
+      while (i < tWords.length && i < dWords.length && tWords[i] === dWords[i]) i++;
+      liveDisplayedText = tWords.slice(0, i).join(" ");
+    }
+
+    // ── Adaptive cadence ────────────────────────────────────────────────
+    // Measure interval since last recompute; divide by the number of words
+    // we need to reveal to land roughly when the next backend cycle does.
+    // This matches the typewriter pace to the actual speaker rate.
+    const now = Date.now();
+    if (liveLastRecomputeAt > 0 && liveDisplayedTarget !== liveDisplayedText) {
+      const interval = now - liveLastRecomputeAt;
+      const remaining = liveDisplayedTarget.slice(liveDisplayedText.length).trim();
+      const wordsToReveal = remaining ? remaining.split(/\s+/).length : 0;
+      if (wordsToReveal > 0 && interval > 0) {
+        const measured = Math.round(interval / wordsToReveal);
+        // Smooth so a single fast/slow cycle doesn't whiplash the cadence
+        const blended = Math.round(0.6 * measured + 0.4 * liveCadenceMs);
+        liveCadenceMs = Math.max(CADENCE_MIN_MS, Math.min(CADENCE_MAX_MS, blended));
+      }
+    }
+    liveLastRecomputeAt = now;
+
+    if (liveDisplayedText !== liveDisplayedTarget) {
+      startDisplayAnim();
+    } else {
+      stopDisplayAnim();
+    }
+    renderLiveSegments();
+  }
+
+  function startDisplayAnim() {
+    // Restart with the latest cadence — setInterval can't be retuned in place.
+    if (liveDisplayTimer) clearInterval(liveDisplayTimer);
+    liveDisplayTimer = setInterval(advanceDisplayAnim, liveCadenceMs);
+  }
+
+  function stopDisplayAnim() {
+    if (liveDisplayTimer) {
+      clearInterval(liveDisplayTimer);
+      liveDisplayTimer = null;
+    }
+  }
+
+  function advanceDisplayAnim() {
+    if (liveDisplayedText === liveDisplayedTarget) {
+      stopDisplayAnim();
+      // Typewriter caught up. If a final_segment is waiting to be pushed
+      // (queued so the user sees the whole sentence finish typing before it
+      // hops into the list), commit it now.
+      if (livePendingFinal) {
+        const pending = livePendingFinal;
+        pushFinalSegment(pending.seg, pending.draftText, pending.draftIdx);
+      }
+      return;
+    }
+    if (liveDisplayedTarget.startsWith(liveDisplayedText)) {
+      const remainder = liveDisplayedTarget.slice(liveDisplayedText.length);
+      const m = remainder.match(/^(\s*\S+)/);
+      liveDisplayedText = m ? liveDisplayedText + m[1] : liveDisplayedTarget;
+    } else {
+      // Defensive — recomputeDisplayedTarget should have rebased us already
+      liveDisplayedText = liveDisplayedTarget;
+    }
+    renderLiveSegments();
+  }
+
+  function pushFinalSegment(seg, draftText, draftIdx) {
+    const segIdx = liveSegments.length;
+    liveSegments.push(seg);
+    livePendingFinal = null;
+    clearLiveDisplay();
+    setLiveStatus(`${liveSegments.length} segments`);
+    liveTransLangs.forEach(langCode => {
+      const cached = useDraftTranslation(segIdx, seg.text, langCode, draftIdx, draftText);
+      if (!cached) {
+        translateLiveSegment(segIdx, seg.text, langCode);
+      }
+    });
+  }
+
+  // ── Pre-translate draft sentences for faster final translation ──
+  // Backend emits draft_segment when the committed prefix grows; we kick off a
+  // translation immediately so the result is ready (or in flight) by the time
+  // the final_segment arrives.
+  async function preTranslateDraft(nextIndex, text, langCode) {
+    if (!text || nextIndex < 0) return;
+    if (!liveDraftTranslations[langCode]) liveDraftTranslations[langCode] = {};
+    // Same source already pre-translated (or in flight) — skip
+    if (liveDraftSourceTexts[nextIndex] === text && (liveDraftTranslations[langCode][nextIndex] || liveDraftTranslations[langCode][nextIndex] === "")) {
+      return;
+    }
+    // Abort previous in-flight pre-translation for this slot
+    const aborterKey = `${langCode}:${nextIndex}`;
+    if (liveDraftAborters[aborterKey]) {
+      try { liveDraftAborters[aborterKey].abort(); } catch (_) {}
+    }
+    const ctrl = new AbortController();
+    liveDraftAborters[aborterKey] = ctrl;
+
+    liveDraftSourceTexts[nextIndex] = text;
+    liveDraftTranslations[langCode][nextIndex] = ""; // reserve
+
+    const provider = document.getElementById("translationProvider")?.value || "ollama";
+    try {
+      const res = await fetch(BACKEND_URL + "/translate/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: text,
+          source_lang: "auto",
+          target_lang: langCode,
+          provider: provider,
+        }),
+        signal: ctrl.signal,
+      });
+      if (!res.body) {
+        const fallback = await res.text();
+        if (liveDraftSourceTexts[nextIndex] === text) {
+          liveDraftTranslations[langCode][nextIndex] = (fallback || "").trim();
+        }
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let acc = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        acc += decoder.decode(value, { stream: true });
+        // If draft text changed while streaming, the request was already aborted —
+        // but guard once more in case the abort raced with a chunk arrival.
+        if (liveDraftSourceTexts[nextIndex] !== text) return;
+      }
+      acc += decoder.decode();
+      if (liveDraftSourceTexts[nextIndex] === text) {
+        liveDraftTranslations[langCode][nextIndex] = acc.trim();
+      }
+    } catch (e) {
+      if (e?.name === "AbortError") return;
+      console.warn(`[live] Pre-translation failed for draft #${nextIndex} → ${langCode}:`, e);
+    } finally {
+      if (liveDraftAborters[aborterKey] === ctrl) {
+        delete liveDraftAborters[aborterKey];
+      }
+    }
+  }
+
+  // Returns true if a cached draft translation was applied; false if caller
+  // should fall back to a fresh translation request.
+  function useDraftTranslation(segIdx, finalText, langCode, draftIdx, draftText) {
+    if (draftIdx !== segIdx || !draftText) return false;
+    // Compare normalized (strip trailing/leading whitespace + sentence punct)
+    const norm = (s) => (s || "").trim().replace(/[\s.!?。！？,;，；:]+$/u, "").toLowerCase();
+    if (norm(finalText) !== norm(draftText)) return false;
+    const cached = liveDraftTranslations[langCode]?.[segIdx];
+    if (typeof cached !== "string" || !cached) return false;
+    if (!liveTranslations[langCode]) liveTranslations[langCode] = {};
+    liveTranslations[langCode][segIdx] = cached;
+    renderLiveSegments();
+    return true;
+  }
+
   // ── Realtime translation for live segments ──
   async function translateLiveSegment(segIdx, text, langCode) {
-    // Skip if already translated
+    // Skip if already translated (non-empty string)
     if (liveTranslations[langCode]?.[segIdx]) return;
 
-    // Initialize storage for this language
     if (!liveTranslations[langCode]) liveTranslations[langCode] = {};
+    // Reserve slot so UI shows "translating..." instead of nothing
+    liveTranslations[langCode][segIdx] = "";
+
+    const provider = document.getElementById("translationProvider")?.value || "ollama";
 
     try {
-      const provider = document.getElementById("translationProvider")?.value || "ollama";
-      const res = await fetch(BACKEND_URL + "/translate/one", {
+      const res = await fetch(BACKEND_URL + "/translate/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3945,13 +4375,65 @@ function initLiveTab() {
           provider: provider,
         }),
       });
-      const data = await res.json();
-      if (data.text) {
-        liveTranslations[langCode][segIdx] = data.text;
+
+      if (!res.body) {
+        // Browser doesn't support body streaming — read full response
+        const fallback = await res.text();
+        liveTranslations[langCode][segIdx] = fallback;
         renderLiveSegments();
+        return;
       }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let acc = "";
+      let renderScheduled = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        acc += decoder.decode(value, { stream: true });
+        liveTranslations[langCode][segIdx] = acc;
+        // Throttle re-renders to ~60ms — feels smooth without thrashing layout
+        if (!renderScheduled) {
+          renderScheduled = true;
+          setTimeout(() => {
+            renderScheduled = false;
+            renderLiveSegments();
+          }, 60);
+        }
+      }
+      // Flush decoder + final render
+      acc += decoder.decode();
+      liveTranslations[langCode][segIdx] = acc.trim();
+      renderLiveSegments();
     } catch (e) {
       console.warn(`[live] Translation failed for seg ${segIdx} → ${langCode}:`, e);
+      // Allow retry by clearing the empty placeholder
+      if (liveTranslations[langCode][segIdx] === "") {
+        delete liveTranslations[langCode][segIdx];
+      }
+    }
+  }
+
+  async function prewarmTranslator() {
+    const provider = document.getElementById("translationProvider")?.value || "ollama";
+    if (provider !== "ollama") return;
+    if (!liveTransLangs.length) return;
+    try {
+      // Single warmup call — same model serves all target languages
+      await fetch(BACKEND_URL + "/translate/prewarm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: "warmup",
+          source_lang: "auto",
+          target_lang: liveTransLangs[0] || "en",
+          provider: provider,
+        }),
+      });
+    } catch (e) {
+      console.warn("[live] Translator prewarm failed:", e);
     }
   }
 
@@ -3981,11 +4463,17 @@ function initLiveTab() {
     // Clear previous session data when starting fresh
     liveSegments = [];
     liveTranslations = {};
-    livePartialText = "";
+    liveDraftTranslations = {};
+    liveDraftSourceTexts = {};
+    liveDraftAborters = {};
+    clearLiveDisplay();
     liveElapsedBefore = 0;
     renderLiveSegments();
 
     setLiveStatus("Connecting...");
+
+    // Fire-and-forget translator warm-up in parallel with audio setup
+    prewarmTranslator();
 
     try {
       // Get media stream DIRECTLY in click handler (required for getDisplayMedia)
@@ -4062,7 +4550,10 @@ function initLiveTab() {
     livePaused = false;
     liveSegments = [];
     liveTranslations = {};
-    livePartialText = "";
+    liveDraftTranslations = {};
+    liveDraftSourceTexts = {};
+    liveDraftAborters = {};
+    clearLiveDisplay();
     liveElapsedBefore = 0;
     stopCapture(false);
     showStoppedUI();
@@ -4228,6 +4719,19 @@ function initLiveTab() {
       const isOpen = !body.classList.contains("hidden");
       body.classList.toggle("hidden");
       chevron.innerHTML = isOpen ? "&#9654;" : "&#9660;";
+      // Refresh model lists when panel opens so newly-pulled / downloaded
+      // models show up without needing a manual click.
+      if (!isOpen) {
+        const provider = document.getElementById("liveTransProvider")?.value || "ollama";
+        if (provider === "ollama") {
+          const savedModel = document.getElementById("liveOllamaModelSelect")?.value;
+          refreshLiveOllamaModels(savedModel);
+        } else if (provider === "hymt2") {
+          refreshLiveHyMT2Status();
+        } else if (provider === "nllb") {
+          refreshLiveNLLBStatus();
+        }
+      }
     });
   }
 
@@ -4391,18 +4895,119 @@ function initLiveTab() {
     document.getElementById("liveReplaceAllBtn")?.addEventListener("click", liveReplaceAll);
   }
 
+  // ── Live whisper model download/cache info (mirrors Editor's modelInfo) ──
+  async function updateLiveModelInfo() {
+    const info = document.getElementById("liveModelInfo");
+    const sel = document.getElementById("liveModelSelect");
+    if (!info || !sel) return;
+    const selected = sel.value;
+    const deviceTag = backendDevice ? ` · ${backendDevice}` : "";
+    try {
+      const data = await fetchBackend("/models");
+      const model = (data.models || []).find(m => m.id === selected);
+      const isCached = model ? model.cached : false;
+      const isLoaded = data.current === selected;
+      const size = model ? model.size : "";
+      if (isLoaded) {
+        info.innerHTML = `<span class="model-tag tag-loaded">READY</span> ${selected}${deviceTag}`;
+      } else if (isCached) {
+        info.innerHTML = `<span class="model-tag tag-loaded">CACHED</span> ${selected} — will switch on start${deviceTag}`;
+      } else {
+        info.innerHTML = `<span class="model-tag tag-download">DOWNLOAD</span> ${selected} (${size}) — first run will download${deviceTag}`;
+      }
+    } catch {
+      info.innerHTML = `${selected}${deviceTag}`;
+    }
+  }
+  document.getElementById("liveModelSelect")?.addEventListener("change", updateLiveModelInfo);
+  // Initial render — and again whenever backend status refreshes.
+  updateLiveModelInfo();
+  setInterval(updateLiveModelInfo, 5000);
+
+  // ── Live Ollama model list refresh ──
+  async function refreshLiveOllamaModels(savedModel) {
+    const select = document.getElementById("liveOllamaModelSelect");
+    if (!select) return;
+    try {
+      const data = await fetchBackend("/ollama/status");
+      const models = data.models || [];
+      select.innerHTML = "";
+      if (models.length === 0) {
+        select.innerHTML = '<option value="">No models found</option>';
+        return;
+      }
+      models.forEach(name => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        select.appendChild(opt);
+      });
+      if (savedModel && models.includes(savedModel)) {
+        select.value = savedModel;
+      } else {
+        select.value = models[0];
+      }
+    } catch {
+      select.innerHTML = '<option value="">Ollama not reachable</option>';
+    }
+  }
+  document.getElementById("liveRefreshOllamaModelsBtn")?.addEventListener("click", () => refreshLiveOllamaModels());
+  document.getElementById("liveOllamaUrlInput")?.addEventListener("change", () => refreshLiveOllamaModels());
+
+  // ── Live Hy-MT2 status refresh ──
+  async function refreshLiveHyMT2Status() {
+    const statusText = document.getElementById("liveHymt2StatusText");
+    const downloadBtn = document.getElementById("liveHymt2DownloadBtn");
+    if (!statusText || !downloadBtn) return;
+    const size = document.getElementById("liveHymt2ModelSize")?.value || "1.8B";
+    try {
+      const data = await fetchBackend(`/hymt2/status?model_size=${size}`);
+      if (data.downloaded) {
+        statusText.textContent = `✓ ${data.model_id} ready`;
+        statusText.style.color = "var(--accent)";
+        downloadBtn.textContent = "Re-download";
+      } else {
+        statusText.textContent = `Not downloaded — ${data.model_id}`;
+        statusText.style.color = "";
+        downloadBtn.textContent = "Download";
+      }
+    } catch {
+      statusText.textContent = "Status check failed";
+      statusText.style.color = "";
+    }
+  }
+
+  // ── Live NLLB-200 status refresh ──
+  async function refreshLiveNLLBStatus() {
+    const statusText = document.getElementById("liveNllbStatusText");
+    const downloadBtn = document.getElementById("liveNllbDownloadBtn");
+    if (!statusText || !downloadBtn) return;
+    const size = document.getElementById("liveNllbModelSize")?.value || "600M";
+    try {
+      const data = await fetchBackend(`/nllb/status?model_size=${size}`);
+      if (data.downloaded) {
+        statusText.textContent = `✓ ${data.model_id} ready`;
+        statusText.style.color = "var(--accent)";
+        downloadBtn.textContent = "Re-download";
+      } else {
+        statusText.textContent = `Not downloaded — ${data.model_id}`;
+        statusText.style.color = "";
+        downloadBtn.textContent = "Download";
+      }
+    } catch {
+      statusText.textContent = "Status check failed";
+      statusText.style.color = "";
+    }
+  }
+
   // ── Live settings provider toggle ──
   function updateLiveProviderUI(provider) {
     document.getElementById("liveOllamaSettings")?.classList.toggle("hidden", provider !== "ollama");
     document.getElementById("liveHymt2Settings")?.classList.toggle("hidden", provider !== "hymt2");
+    document.getElementById("liveNllbSettings")?.classList.toggle("hidden", provider !== "nllb");
     document.getElementById("liveClaudeKeyRow")?.classList.toggle("hidden", provider !== "claude");
-    if (provider === "hymt2") {
-      const size = document.getElementById("liveHymt2ModelSize")?.value || "1.8B";
-      fetchBackend(`/hymt2/status?model_size=${size}`).then(data => {
-        const el = document.getElementById("liveHymt2StatusText");
-        if (el) el.textContent = data.downloaded ? `✓ ${data.model_id} ready` : `Not downloaded — ${data.model_id}`;
-      }).catch(() => {});
-    }
+    if (provider === "hymt2") refreshLiveHyMT2Status();
+    if (provider === "nllb") refreshLiveNLLBStatus();
   }
 
   const liveProviderSelect = document.getElementById("liveTransProvider");
@@ -4411,21 +5016,94 @@ function initLiveTab() {
     updateLiveProviderUI(liveProviderSelect.value);
   }
 
-  document.getElementById("liveHymt2ModelSize")?.addEventListener("change", () => {
+  document.getElementById("liveHymt2ModelSize")?.addEventListener("change", refreshLiveHyMT2Status);
+  document.getElementById("liveNllbModelSize")?.addEventListener("change", refreshLiveNLLBStatus);
+
+  // ── Live NLLB-200 download (mirrors Live Hy-MT2 flow) ──
+  document.getElementById("liveNllbDownloadBtn")?.addEventListener("click", async () => {
+    const btn = document.getElementById("liveNllbDownloadBtn");
+    const statusText = document.getElementById("liveNllbStatusText");
+    const size = document.getElementById("liveNllbModelSize")?.value || "600M";
+    btn.disabled = true;
+    btn.textContent = "Downloading...";
+    statusText.textContent = "Downloading model — this may take several minutes...";
+    statusText.style.color = "";
+    try {
+      await fetchBackend("/nllb/download", {
+        method: "POST",
+        body: JSON.stringify({ model_size: size }),
+      });
+      let polling = true;
+      while (polling) {
+        await new Promise(r => setTimeout(r, 3000));
+        const data = await fetchBackend(`/nllb/status?model_size=${size}`);
+        const dlp = data.download_progress || {};
+        if (data.downloaded || dlp.status === "done") {
+          statusText.textContent = `✓ ${data.model_id} ready`;
+          statusText.style.color = "var(--accent)";
+          polling = false;
+        } else if (dlp.status === "error") {
+          statusText.textContent = `Error: ${dlp.detail || "download failed"}`;
+          polling = false;
+        } else if (dlp.detail) {
+          statusText.textContent = dlp.detail;
+        }
+      }
+    } catch (err) {
+      statusText.textContent = `Error: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Re-download";
+    }
+  });
+
+  // ── Live Hy-MT2 download (mirrors editor's hymt2DownloadBtn flow) ──
+  document.getElementById("liveHymt2DownloadBtn")?.addEventListener("click", async () => {
+    const btn = document.getElementById("liveHymt2DownloadBtn");
+    const statusText = document.getElementById("liveHymt2StatusText");
     const size = document.getElementById("liveHymt2ModelSize")?.value || "1.8B";
-    fetchBackend(`/hymt2/status?model_size=${size}`).then(data => {
-      const el = document.getElementById("liveHymt2StatusText");
-      if (el) el.textContent = data.downloaded ? `✓ ${data.model_id} ready` : `Not downloaded — ${data.model_id}`;
-    }).catch(() => {});
+    btn.disabled = true;
+    btn.textContent = "Downloading...";
+    statusText.textContent = "Downloading model — this may take several minutes...";
+    statusText.style.color = "";
+    try {
+      await fetchBackend("/hymt2/download", {
+        method: "POST",
+        body: JSON.stringify({ model_size: size }),
+      });
+      let polling = true;
+      while (polling) {
+        await new Promise(r => setTimeout(r, 3000));
+        const data = await fetchBackend(`/hymt2/status?model_size=${size}`);
+        const dlp = data.download_progress || {};
+        if (data.downloaded || dlp.status === "done") {
+          statusText.textContent = `✓ ${data.model_id} ready`;
+          statusText.style.color = "var(--accent)";
+          polling = false;
+        } else if (dlp.status === "error") {
+          statusText.textContent = `Error: ${dlp.detail || "download failed"}`;
+          polling = false;
+        } else if (dlp.detail) {
+          statusText.textContent = dlp.detail;
+        }
+      }
+    } catch (err) {
+      statusText.textContent = `Error: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Re-download";
+    }
   });
 
   // ── Live save settings ──
   document.getElementById("liveSaveSettingsBtn")?.addEventListener("click", async () => {
     const settings = {
+      hf_token: document.getElementById("liveHfTokenInput")?.value.trim() || "",
       translation_provider: document.getElementById("liveTransProvider")?.value || "ollama",
       ollama_url: document.getElementById("liveOllamaUrlInput")?.value.trim() || "http://localhost:11434",
       ollama_model: document.getElementById("liveOllamaModelSelect")?.value || "",
       hymt2_model_size: document.getElementById("liveHymt2ModelSize")?.value || "1.8B",
+      nllb_model_size: document.getElementById("liveNllbModelSize")?.value || "600M",
       anthropic_api_key: document.getElementById("liveClaudeApiKeyInput")?.value.trim() || "",
     };
     try {
@@ -4436,6 +5114,43 @@ function initLiveTab() {
       console.error("Save settings error:", e);
     }
   });
+
+  // ── Load saved settings into Live inputs ──
+  // Settings are shared with Editor — but Live has its own inputs, so we
+  // populate them from the same /settings endpoint on tab init.
+  async function loadLiveSavedSettings() {
+    try {
+      const s = await fetchBackend("/settings");
+      if (s.hf_token) {
+        const el = document.getElementById("liveHfTokenInput");
+        if (el) el.value = s.hf_token;
+      }
+      if (s.translation_provider) {
+        const sel = document.getElementById("liveTransProvider");
+        if (sel) { sel.value = s.translation_provider; sel.dispatchEvent(new Event("change")); }
+      }
+      if (s.ollama_url) {
+        const el = document.getElementById("liveOllamaUrlInput");
+        if (el) el.value = s.ollama_url;
+      }
+      if (s.anthropic_api_key) {
+        const el = document.getElementById("liveClaudeApiKeyInput");
+        if (el) el.value = s.anthropic_api_key;
+      }
+      if (s.hymt2_model_size) {
+        const el = document.getElementById("liveHymt2ModelSize");
+        if (el) el.value = s.hymt2_model_size;
+      }
+      if (s.nllb_model_size) {
+        const el = document.getElementById("liveNllbModelSize");
+        if (el) el.value = s.nllb_model_size;
+      }
+      await refreshLiveOllamaModels(s.ollama_model);
+    } catch {
+      await refreshLiveOllamaModels();
+    }
+  }
+  loadLiveSavedSettings();
 }
 
 // ── Init ──
