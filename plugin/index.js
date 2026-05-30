@@ -3550,6 +3550,10 @@ function initLiveTab() {
   let liveMediaStream = null;  // MediaStream from getUserMedia/getDisplayMedia
   let liveAudioCtx = null;     // AudioContext
   let liveWorklet = null;      // ScriptProcessorNode
+  let liveRecordedChunks = []; // Int16Array PCM chunks captured during the session
+  let liveRecBlobUrl = null;   // object URL of the built WAV for playback
+  let liveRecActiveIdx = -1;   // segment currently highlighted during playback
+  const LIVE_REC_SAMPLE_RATE = 16000;
   let liveSegments = [];       // Transcribed segments
   let liveFilter = "speech";   // "speech" | "translation"
   let liveTransLangs = [];     // max 2 translation languages
@@ -3585,18 +3589,55 @@ function initLiveTab() {
   let liveCadenceMs = CADENCE_DEFAULT_MS;
   let liveLastRecomputeAt = 0;
 
+  // ── Timecode-paced word reveal (live box) ──────────────────────────────
+  // Each word from the backend carries its absolute spoken start time. We
+  // reveal words one-by-one paced by the GAP between their timecodes, so the
+  // on-screen rhythm matches the speaker (hesitation → pause, fast → fast).
+  // Append-only: a revealed word is never rewritten (no flicker); corrections
+  // surface only in the list when the line graduates.
+  let liveShownWords = [];    // word tokens already revealed (current line)
+  let liveWordQueue = [];     // [{w, t}] waiting to be revealed
+  let liveDraftWords = [];    // committed words for the current line (from draft_segment)
+  let liveHypWords = [];      // hypothesis tail words (from partial)
+  let liveRevealTimer = null;
+  let liveIngestTimer = null; // debounce to coalesce draft+partial of one cycle
+  let liveLastWordT = null;   // timecode of the last revealed word
+  const WORD_MIN_MS = 45;        // min visible time per word
+  const WORD_MAX_GAP_MS = 900;   // cap a spoken pause so the box never freezes long
+  const WORD_CATCHUP_BACKLOG = 4;// queue longer than this → speed up to catch realtime
+  const WORD_CATCHUP_MS = 70;    // capped per-word delay while catching up
+
   // Display mode for the in-progress line:
   //   false → committed-only (LocalAgreement-2 commits). +1–2s latency,
   //           but words never retract — feels like YouTube's no-flicker
   //           captions.
   //   true  → include the hypothesis tail. Lower latency, but Whisper may
   //           revise the tail between cycles → visible flicker.
-  const LIVE_SHOW_HYPOTHESIS = false;
+  const LIVE_SHOW_HYPOTHESIS = true;
+
+  // Show committed (draft) words one-by-one with the typewriter instead of
+  // snapping them in instantly. The reveal speed adapts to the backlog (see
+  // revealCadence): comfortable when keeping up, faster when behind — so each
+  // word is still visible while catching up to the live voice.
+  const LIVE_INSTANT_COMMIT = false;
+
+  // Word-reveal cadence (ms per word). Default = comfortable reading pace when
+  // transcription keeps up; when a backlog builds (slow transcription), the
+  // pace speeds up toward REVEAL_FAST_MS so the line catches up to realtime,
+  // while still animating each word. The whole backlog targets ~CATCHUP_BUDGET.
+  const REVEAL_DEFAULT_MS = 190;
+  const REVEAL_FAST_MS = 45;
+  const REVEAL_CATCHUP_BUDGET_MS = 650;
 
   // When final_segment fires while the typewriter is still mid-sentence, we
   // queue the push and let typewriter finish revealing the full final text
   // first — avoids an abrupt snap-to-end visual.
   let livePendingFinal = null; // { seg, draftText, draftIdx }
+
+  // A finished line currently shown on the highlighted live box but not yet
+  // moved into the list below. It graduates when the next line appears, so
+  // every line is seen on the realtime box first (never "dumped" to the list).
+  let livePendingGraduation = null; // { seg, index, draftText, draftIdx }
 
   // Translation state
   let liveTranslations = {};  // { langCode: { segIndex: "translated text" } }
@@ -3691,7 +3732,7 @@ function initLiveTab() {
     const countEl = document.getElementById("liveSegmentCount");
     if (!list) return;
 
-    const hasContent = liveSegments.length > 0 || liveDisplayedText;
+    const hasContent = liveSegments.length > 0 || liveDisplayedText || liveRunning;
 
     if (!hasContent) {
       list.innerHTML = '<div class="segment-empty">Select an input source and press Start</div>';
@@ -3720,9 +3761,14 @@ function initLiveTab() {
       // Also show ONE "translating..." segment after the last translated one
       const showUpTo = Math.min(maxTranslatedIdx + 1, liveSegments.length - 1);
 
+      // Order: newest-first while LIVE; chronological (oldest-first) for review.
+      const order = [];
+      for (let i = 0; i <= showUpTo; i++) order.push(i);
+      if (liveRunning) order.reverse();
+
       if (liveTextView) {
         let html = '';
-        for (let i = showUpTo; i >= 0; i--) {
+        for (const i of order) {
           const seg = liveSegments[i];
           const trans = transData[i];
           html += `<div class="live-text-line live-speech-text" data-seg-idx="${i}">${seg.text || ""}</div>`;
@@ -3735,7 +3781,7 @@ function initLiveTab() {
         list.innerHTML = html || '<div class="segment-empty">Waiting for translation...</div>';
       } else {
         let html = '';
-        for (let i = showUpTo; i >= 0; i--) {
+        for (const i of order) {
           const seg = liveSegments[i];
           const startFmt = fmtTime(seg.start);
           const endFmt = fmtTime(seg.end);
@@ -3760,50 +3806,47 @@ function initLiveTab() {
       }
     } else {
       // ── SPEECH VIEW ──
-      // Fast transcription display, newest first, no translation
-      // The "in-progress" line is the monotonically growing typewriter buffer
-      // (liveDisplayedText). The prefix that backend has already committed is
-      // styled as draft (bold); the tail past that — still hypothesis — is
-      // italic. The split is by character length, since liveDisplayedText is
-      // built from liveDraftText + " " + liveHypothesisText.
+      // Fast transcription display, newest first, no translation.
+      // The "in-progress" line is the append-only live buffer (liveDisplayedText):
+      // it only grows, never rewrites, so we render it in ONE uniform style —
+      // no draft/hypothesis split that could cause a style flicker.
       const total = liveDisplayedText || "";
       const hasInProgress = !!total;
-      let inProgressInner = "";
-      if (total) {
-        const draftLen = liveDraftText ? liveDraftText.length : 0;
-        if (draftLen > 0 && total.startsWith(liveDraftText)) {
-          const draftPart = total.slice(0, draftLen);
-          const tailPart = total.slice(draftLen);
-          inProgressInner = `<span class="live-draft">${draftPart}</span>`
-            + (tailPart ? `<span class="live-hypothesis">${tailPart}</span>` : "");
-        } else if (draftLen > 0 && total.length < draftLen) {
-          // Typewriter hasn't caught up to the full draft yet — style as draft.
-          inProgressInner = `<span class="live-draft">${total}</span>`;
-        } else {
-          inProgressInner = `<span class="live-hypothesis">${total}</span>`;
-        }
-      }
+      const inProgressInner = total ? `<span class="live-draft">${total}</span>` : "";
+
+      // Always keep the live caption box at the top (highlighted) while running,
+      // so the user has a stable focal point — even during brief pauses when
+      // there's no in-progress text yet.
+      const showLiveBox = hasInProgress || liveRunning;
+      const liveInner = hasInProgress
+        ? inProgressInner
+        : `<span class="live-waiting">Listening…</span>`;
+
+      // Order: newest-first while LIVE; chronological (oldest-first) for review.
+      const order = [];
+      for (let i = 0; i < liveSegments.length; i++) order.push(i);
+      if (liveRunning) order.reverse();
 
       if (liveTextView) {
         let html = '';
-        if (hasInProgress) {
-          html += `<div class="live-text-line live-partial">${inProgressInner}</div>`;
+        if (showLiveBox) {
+          html += `<div class="live-text-line live-partial">${liveInner}</div>`;
         }
-        for (let i = liveSegments.length - 1; i >= 0; i--) {
+        for (const i of order) {
           html += `<div class="live-text-line live-speech-text" data-seg-idx="${i}">${liveSegments[i].text || ""}</div>`;
         }
         list.innerHTML = html;
       } else {
         let html = '';
-        if (hasInProgress) {
+        if (showLiveBox) {
           html += `<div class="segment-item live-partial-item">
             <div class="segment-header">
               <span class="segment-time live-partial-label">● live</span>
             </div>
-            <div class="segment-text live-partial">${inProgressInner}</div>
+            <div class="segment-text live-partial">${liveInner}</div>
           </div>`;
         }
-        for (let i = liveSegments.length - 1; i >= 0; i--) {
+        for (const i of order) {
           const seg = liveSegments[i];
           const startFmt = fmtTime(seg.start);
           const endFmt = fmtTime(seg.end);
@@ -3981,6 +4024,9 @@ function initLiveTab() {
       // (frontend silence filtering caused missed speech starts)
       const int16 = downsampleTo16k(float32, nativeRate);
       liveWs.send(int16.buffer);
+      // Keep a copy for post-session playback (16kHz mono PCM). Slice to detach
+      // from the underlying buffer so it isn't mutated by the next callback.
+      liveRecordedChunks.push(int16.slice());
     };
 
     source.connect(liveWorklet);
@@ -4009,20 +4055,28 @@ function initLiveTab() {
         setLiveStatus(`Listening — model: ${data.model}, lang: ${data.language}`);
 
       } else if (data.type === "partial") {
-        // Hypothesis tail updated — only feed it into the display if we
-        // explicitly opted in. Default (LIVE_SHOW_HYPOTHESIS=false) hides
-        // the flickering tail and shows only committed words.
+        // Hypothesis tail updated — feed its per-word timecodes into the live
+        // word reveal so the unsettled tail appears at the speaker's rhythm too.
         if (LIVE_SHOW_HYPOTHESIS) {
-          setLiveHypothesis(data.text || "");
+          liveHypWords = Array.isArray(data.words) ? data.words : [];
+          refreshLiveTarget();
         }
         setLiveStatus(`Listening... ${liveSegments.length} segments`);
 
       } else if (data.type === "draft_segment") {
-        // Committed prefix changed — same combined typewriter buffer, but
-        // also kick off pre-translation when there's enough text.
+        // In-progress committed words for the upcoming line. A draft for a NEW
+        // line (next_index past the one we're holding on the live box) means
+        // the previous finished line should now graduate down into the list.
         const draftText = data.text || "";
         const nextIdx = typeof data.next_index === "number" ? data.next_index : -1;
-        setLiveDraft(draftText, nextIdx);
+        if (livePendingGraduation && nextIdx > livePendingGraduation.index) {
+          graduatePending();
+          resetLiveLine();   // new line → restart the append-only live buffer
+        }
+        liveDraftText = draftText;          // kept for translation pairing
+        liveDraftNextIndex = nextIdx;
+        liveDraftWords = Array.isArray(data.words) ? data.words : [];
+        refreshLiveTarget();                // feed committed words (timecode-paced)
         const draftWordCount = draftText ? draftText.trim().split(/\s+/).length : 0;
         if (nextIdx >= 0 && draftWordCount >= 4) {
           liveTransLangs.forEach(langCode => {
@@ -4031,26 +4085,26 @@ function initLiveTab() {
         }
 
       } else if (data.type === "final_segment") {
-        // If typewriter is mid-reveal, queue the push and let it finish
-        // typing the full final text before the segment hops into the list.
+        // A line is complete. It stays on the highlighted live box (every line
+        // passes through there) and only graduates into the list when the NEXT
+        // line appears. We flush any words still queued so the line shows in
+        // full, then freeze the box on it.
         const seg = data.segment;
-        if (!seg || !seg.text) { /* nothing to do */ }
-        else if (liveDisplayedText && liveDisplayedText !== seg.text) {
-          livePendingFinal = {
+        if (seg && seg.text) {
+          if (livePendingGraduation) { graduatePending(); resetLiveLine(); }
+          flushLiveWords();                 // reveal remaining queued words now
+          const idx = typeof data.index === "number" ? data.index : liveSegments.length;
+          livePendingGraduation = {
             seg,
+            index: idx,
             draftText: liveDraftText,
             draftIdx: liveDraftNextIndex,
           };
-          // Treat the full sentence as committed so typewriter has something
-          // concrete to advance toward (backend may have committed words
-          // during finalize that didn't reach our local draft state).
-          liveDraftText = seg.text;
-          liveDraftNextIndex = -1;
-          liveHypothesisText = "";
-          scheduleRecompute();
-          setLiveStatus(`Finishing sentence…`);
-        } else {
-          pushFinalSegment(seg, liveDraftText, liveDraftNextIndex);
+          // Freeze: clear word sources so a partial for the next line can't feed
+          // onto this held line before it graduates.
+          liveDraftWords = [];
+          liveHypWords = [];
+          setLiveStatus(`${liveSegments.length + 1} segments`);
         }
 
       } else if (data.type === "stopped") {
@@ -4103,6 +4157,7 @@ function initLiveTab() {
     newBtn.classList.add("hidden");
     document.getElementById("liveExportToggle")?.closest(".section")?.classList.add("hidden");
     document.getElementById("liveSettingsSection")?.classList.add("hidden");
+    document.getElementById("liveRecordingSection")?.classList.add("hidden");
     livePanel.classList.add("live-focus");
   }
 
@@ -4167,11 +4222,25 @@ function initLiveTab() {
     liveLastRecomputeAt = 0;
     liveCadenceMs = CADENCE_DEFAULT_MS;
     livePendingFinal = null;
+    livePendingGraduation = null;
+    // Reset timecode word-reveal state too.
+    if (liveRevealTimer) { clearTimeout(liveRevealTimer); liveRevealTimer = null; }
+    if (liveIngestTimer) { clearTimeout(liveIngestTimer); liveIngestTimer = null; }
+    liveShownWords = [];
+    liveWordQueue = [];
+    liveDraftWords = [];
+    liveHypWords = [];
+    liveLastWordT = null;
     stopDisplayAnim();
     renderLiveSegments();
   }
 
   function recomputeDisplayedTarget() {
+    // While a finished line is held awaiting graduation, the live box is FROZEN
+    // on that line — ignore stray drafts/partials for the next line until it
+    // actually graduates (which resets the buffer). Prevents any mixing/flicker.
+    if (livePendingGraduation) return;
+
     // Smart-join draft + hypothesis with exactly one space between, trimming
     // any whitespace at the seam so we don't get double spaces.
     let target = "";
@@ -4185,58 +4254,150 @@ function initLiveTab() {
     if (!target) {
       liveDisplayedText = "";
       stopDisplayAnim();
-      liveLastRecomputeAt = 0;
       renderLiveSegments();
       return;
     }
 
-    if (!target.startsWith(liveDisplayedText)) {
-      // Target diverged from what's displayed — either Whisper revised the
-      // hypothesis or the committed draft shifted. Find the longest common
-      // word-prefix and snap displayed back to it (single edit, NOT a
-      // per-word re-type). The animation then resumes forward.
-      const tWords = target.split(/\s+/);
-      const dWords = liveDisplayedText.split(/\s+/);
-      let i = 0;
-      while (i < tWords.length && i < dWords.length && tWords[i] === dWords[i]) i++;
-      liveDisplayedText = tWords.slice(0, i).join(" ");
+    // ── Append-only live line (instant, zero flicker) ──────────────────────
+    // The live box grows MONOTONICALLY: words already on screen are never
+    // rewritten or retracted, so there is no flicker. We only extend with words
+    // beyond what's already shown, and we render them immediately (no typewriter
+    // delay). If Whisper later revises an earlier word, the live box keeps the
+    // original — the correction surfaces in the list when the line graduates
+    // (that uses the backend's final, corrected text).
+    const shownWords = liveDisplayedText ? liveDisplayedText.split(/\s+/) : [];
+    const targetWords = target.split(/\s+/);
+    if (targetWords.length > shownWords.length) {
+      liveDisplayedText = shownWords
+        .concat(targetWords.slice(shownWords.length))
+        .join(" ");
     }
-
-    // ── Adaptive cadence ────────────────────────────────────────────────
-    // Measure interval since last recompute; divide by the number of words
-    // we need to reveal to land roughly when the next backend cycle does.
-    // This matches the typewriter pace to the actual speaker rate.
-    const now = Date.now();
-    if (liveLastRecomputeAt > 0 && liveDisplayedTarget !== liveDisplayedText) {
-      const interval = now - liveLastRecomputeAt;
-      const remaining = liveDisplayedTarget.slice(liveDisplayedText.length).trim();
-      const wordsToReveal = remaining ? remaining.split(/\s+/).length : 0;
-      if (wordsToReveal > 0 && interval > 0) {
-        const measured = Math.round(interval / wordsToReveal);
-        // Smooth so a single fast/slow cycle doesn't whiplash the cadence
-        const blended = Math.round(0.6 * measured + 0.4 * liveCadenceMs);
-        liveCadenceMs = Math.max(CADENCE_MIN_MS, Math.min(CADENCE_MAX_MS, blended));
-      }
-    }
-    liveLastRecomputeAt = now;
-
-    if (liveDisplayedText !== liveDisplayedTarget) {
-      startDisplayAnim();
-    } else {
-      stopDisplayAnim();
-    }
+    stopDisplayAnim();
     renderLiveSegments();
   }
 
+  // Reset the live box for a brand-new line so the append-only buffer starts
+  // fresh (called when the previous line graduates into the list).
+  function resetLiveLine() {
+    if (liveRevealTimer) { clearTimeout(liveRevealTimer); liveRevealTimer = null; }
+    if (liveIngestTimer) { clearTimeout(liveIngestTimer); liveIngestTimer = null; }
+    liveShownWords = [];
+    liveWordQueue = [];
+    liveDraftWords = [];
+    liveHypWords = [];
+    liveLastWordT = null;
+    liveDisplayedText = "";
+    liveDisplayedTarget = "";
+    liveDraftText = "";
+    liveHypothesisText = "";
+    liveDraftNextIndex = -1;
+  }
+
+  // Join word tokens into a line, with no space before punctuation.
+  function composeLiveWords(words) {
+    let out = "";
+    for (const s of words) {
+      if (!s) continue;
+      if (out && !/^[,.!?;:…)»”'’%]/.test(s)) out += " ";
+      out += s;
+    }
+    return out;
+  }
+
+  // Feed the latest full word list for the current line. Append-only: only
+  // words past what we already know (shown + queued) are added — earlier words
+  // are never touched, even if Whisper revised them.
+  function ingestLiveWords(wordList) {
+    if (livePendingGraduation) return; // frozen on the held line until it graduates
+    const known = liveShownWords.length + liveWordQueue.length;
+    if (wordList.length > known) {
+      for (let i = known; i < wordList.length; i++) liveWordQueue.push(wordList[i]);
+      scheduleWordReveal();
+    }
+  }
+
+  // draft_segment and partial arrive as two separate WS messages in the same
+  // backend cycle. Coalesce them with a tiny debounce so we ingest a consistent
+  // (same-cycle) committed+hypothesis word list — avoids a stale-hypothesis mix.
+  function refreshLiveTarget() {
+    if (liveIngestTimer) return;
+    liveIngestTimer = setTimeout(() => {
+      liveIngestTimer = null;
+      ingestLiveWords(liveDraftWords.concat(liveHypWords));
+    }, 12);
+  }
+
+  // Reveal the next queued word after a delay derived from its timecode gap to
+  // the previous word (the speaker's rhythm), with catch-up when behind.
+  function scheduleWordReveal() {
+    if (liveRevealTimer || liveWordQueue.length === 0) return;
+    const word = liveWordQueue[0];
+    let gapMs = (liveLastWordT != null) ? Math.max(0, (word.t - liveLastWordT) * 1000) : 0;
+    if (liveWordQueue.length > WORD_CATCHUP_BACKLOG) gapMs = Math.min(gapMs, WORD_CATCHUP_MS);
+    const delay = Math.max(WORD_MIN_MS, Math.min(gapMs, WORD_MAX_GAP_MS));
+    liveRevealTimer = setTimeout(() => {
+      liveRevealTimer = null;
+      const w = liveWordQueue.shift();
+      if (!w) return;
+      liveShownWords.push(w.w);
+      liveLastWordT = w.t;
+      liveDisplayedText = composeLiveWords(liveShownWords);
+      renderLiveSegments();
+      scheduleWordReveal();
+    }, delay);
+  }
+
+  // Reveal all remaining queued words instantly (e.g. when a line finalizes, so
+  // the full line is shown before it graduates into the list).
+  function flushLiveWords() {
+    if (liveRevealTimer) { clearTimeout(liveRevealTimer); liveRevealTimer = null; }
+    if (liveIngestTimer) { clearTimeout(liveIngestTimer); liveIngestTimer = null; }
+    while (liveWordQueue.length) {
+      const w = liveWordQueue.shift();
+      liveShownWords.push(w.w);
+      liveLastWordT = w.t;
+    }
+    liveDisplayedText = composeLiveWords(liveShownWords);
+    renderLiveSegments();
+  }
+
+  // Words still waiting to be revealed on the live box.
+  function remainingRevealWords() {
+    if (liveDisplayedTarget === liveDisplayedText) return 0;
+    if (!liveDisplayedTarget.startsWith(liveDisplayedText)) return 1;
+    const rem = liveDisplayedTarget.slice(liveDisplayedText.length).trim();
+    return rem ? rem.split(/\s+/).length : 0;
+  }
+
+  // Per-word delay: comfortable default when keeping up; speeds up as the
+  // backlog grows so the line catches up to the live voice, with a fast floor.
+  function revealCadence(remaining) {
+    if (remaining <= 1) return REVEAL_DEFAULT_MS;
+    const paced = Math.round(REVEAL_CATCHUP_BUDGET_MS / remaining);
+    return Math.max(REVEAL_FAST_MS, Math.min(REVEAL_DEFAULT_MS, paced));
+  }
+
   function startDisplayAnim() {
-    // Restart with the latest cadence — setInterval can't be retuned in place.
-    if (liveDisplayTimer) clearInterval(liveDisplayTimer);
-    liveDisplayTimer = setInterval(advanceDisplayAnim, liveCadenceMs);
+    // Self-scheduling: each word's delay is recomputed from the current backlog
+    // (setTimeout, not setInterval), so a mid-reveal backlog spike speeds it up.
+    stopDisplayAnim();
+    scheduleNextReveal();
+  }
+
+  function scheduleNextReveal() {
+    const remaining = remainingRevealWords();
+    if (remaining <= 0) { liveDisplayTimer = null; return; }
+    const delay = revealCadence(remaining);
+    liveDisplayTimer = setTimeout(() => {
+      liveDisplayTimer = null;
+      advanceDisplayAnim();
+      if (liveDisplayedText !== liveDisplayedTarget) scheduleNextReveal();
+    }, delay);
   }
 
   function stopDisplayAnim() {
     if (liveDisplayTimer) {
-      clearInterval(liveDisplayTimer);
+      clearTimeout(liveDisplayTimer);
       liveDisplayTimer = null;
     }
   }
@@ -4244,9 +4405,6 @@ function initLiveTab() {
   function advanceDisplayAnim() {
     if (liveDisplayedText === liveDisplayedTarget) {
       stopDisplayAnim();
-      // Typewriter caught up. If a final_segment is waiting to be pushed
-      // (queued so the user sees the whole sentence finish typing before it
-      // hops into the list), commit it now.
       if (livePendingFinal) {
         const pending = livePendingFinal;
         pushFinalSegment(pending.seg, pending.draftText, pending.draftIdx);
@@ -4276,6 +4434,44 @@ function initLiveTab() {
         translateLiveSegment(segIdx, seg.text, langCode);
       }
     });
+  }
+
+  // Show a finished line on the live (realtime) box, without moving it into the
+  // list yet. Appends any final words not yet shown (append-only), then FREEZES
+  // the box (clears draft/hypothesis) so a partial for the NEXT line can't get
+  // appended onto this held line before it graduates.
+  function showFinalOnLiveBox(text) {
+    const t = text || "";
+    const shownWords = liveDisplayedText ? liveDisplayedText.split(/\s+/) : [];
+    const tWords = t ? t.split(/\s+/) : [];
+    if (tWords.length > shownWords.length) {
+      liveDisplayedText = shownWords.concat(tWords.slice(shownWords.length)).join(" ");
+    }
+    liveDisplayedTarget = liveDisplayedText;
+    liveDraftText = "";
+    liveHypothesisText = "";
+    liveDraftNextIndex = -1;
+    if (liveRecomputeTimer !== null) { clearTimeout(liveRecomputeTimer); liveRecomputeTimer = null; }
+    stopDisplayAnim();
+    renderLiveSegments();
+  }
+
+  // Move the line currently held on the live box down into the finalized list
+  // (and kick its translation). Called when the next line begins.
+  function graduatePending() {
+    if (!livePendingGraduation) return;
+    const p = livePendingGraduation;
+    livePendingGraduation = null;
+    const segIdx = liveSegments.length;
+    liveSegments.push(p.seg);
+    liveTransLangs.forEach(langCode => {
+      const cached = useDraftTranslation(segIdx, p.seg.text, langCode, p.draftIdx, p.draftText);
+      if (!cached) {
+        translateLiveSegment(segIdx, p.seg.text, langCode);
+      }
+    });
+    // Note: don't clear the live box here — the caller sets the next line's
+    // draft/final right after, which replaces the box contents.
   }
 
   // ── Pre-translate draft sentences for faster final translation ──
@@ -4444,6 +4640,135 @@ function initLiveTab() {
     }
   }
 
+  // ── Live recording (capture → WAV → playback) ──────────────────────────
+  function resetRecording() {
+    liveRecordedChunks = [];
+    liveRecActiveIdx = -1;
+    if (liveRecBlobUrl) { URL.revokeObjectURL(liveRecBlobUrl); liveRecBlobUrl = null; }
+    const audio = document.getElementById("liveRecAudio");
+    if (audio) { try { audio.pause(); } catch (_) {} audio.removeAttribute("src"); audio.load(); }
+    const sec = document.getElementById("liveRecordingSection");
+    if (sec) sec.classList.add("hidden");
+  }
+
+  function buildLiveWavBlob() {
+    let length = 0;
+    for (const c of liveRecordedChunks) length += c.length;
+    if (length === 0) return null;
+    const pcm = new Int16Array(length);
+    let p = 0;
+    for (const c of liveRecordedChunks) { pcm.set(c, p); p += c.length; }
+
+    const sr = LIVE_REC_SAMPLE_RATE;
+    const buffer = new ArrayBuffer(44 + pcm.length * 2);
+    const view = new DataView(buffer);
+    const ws = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+    ws(0, "RIFF");
+    view.setUint32(4, 36 + pcm.length * 2, true);
+    ws(8, "WAVE");
+    ws(12, "fmt ");
+    view.setUint32(16, 16, true);   // PCM chunk size
+    view.setUint16(20, 1, true);    // PCM format
+    view.setUint16(22, 1, true);    // mono
+    view.setUint32(24, sr, true);
+    view.setUint32(28, sr * 2, true); // byte rate
+    view.setUint16(32, 2, true);    // block align
+    view.setUint16(34, 16, true);   // bits per sample
+    ws(36, "data");
+    view.setUint32(40, pcm.length * 2, true);
+    new Int16Array(buffer, 44).set(pcm);
+    return new Blob([buffer], { type: "audio/wav" });
+  }
+
+  // Build the WAV from captured PCM and wire up the playback section.
+  function finalizeRecording() {
+    const blob = buildLiveWavBlob();
+    const sec = document.getElementById("liveRecordingSection");
+    if (!blob || !sec) { if (sec) sec.classList.add("hidden"); return; }
+    if (liveRecBlobUrl) URL.revokeObjectURL(liveRecBlobUrl);
+    liveRecActiveIdx = -1;
+    liveRecBlobUrl = URL.createObjectURL(blob);
+    const audio = document.getElementById("liveRecAudio");
+    const dl = document.getElementById("liveRecDownload");
+    if (dl) dl.href = liveRecBlobUrl;
+    if (audio) { audio.src = liveRecBlobUrl; audio.load(); }
+    sec.classList.remove("hidden");
+  }
+
+  function initRecordingPlayer() {
+    const audio = document.getElementById("liveRecAudio");
+    const playBtn = document.getElementById("liveRecPlayBtn");
+    const playIcon = document.getElementById("liveRecPlayIcon");
+    const seek = document.getElementById("liveRecSeek");
+    const cur = document.getElementById("liveRecCurrent");
+    const tot = document.getElementById("liveRecTotal");
+    if (!audio || !playBtn || !seek) return;
+
+    const setIcon = () => { playIcon.innerHTML = audio.paused ? "&#9654;" : "&#9646;&#9646;"; };
+
+    playBtn.addEventListener("click", () => {
+      if (audio.paused) audio.play(); else audio.pause();
+    });
+    audio.addEventListener("play", setIcon);
+    audio.addEventListener("pause", setIcon);
+    audio.addEventListener("ended", setIcon);
+    audio.addEventListener("loadedmetadata", () => {
+      const d = isFinite(audio.duration) ? audio.duration : 0;
+      seek.max = d || 100;
+      if (tot) tot.textContent = fmtTime(d);
+      if (cur) cur.textContent = "0:00";
+      seek.value = 0;
+    });
+    audio.addEventListener("timeupdate", () => {
+      if (cur) cur.textContent = fmtTime(audio.currentTime);
+      if (!seek.matches(":active")) seek.value = audio.currentTime;
+      highlightRecordingSegment(audio.currentTime);
+    });
+    seek.addEventListener("input", () => { audio.currentTime = parseFloat(seek.value) || 0; });
+  }
+
+  // During playback, highlight the segment matching the current timecode and
+  // keep it focused (scrolled into view) so you can follow along.
+  function highlightRecordingSegment(time) {
+    // Segment containing `time`, else the last one that has started.
+    let idx = -1;
+    for (let i = 0; i < liveSegments.length; i++) {
+      const s = liveSegments[i];
+      const end = (typeof s.end === "number") ? s.end : (s.start + 30);
+      if (time >= s.start && time < end) { idx = i; break; }
+    }
+    if (idx === -1) {
+      for (let i = liveSegments.length - 1; i >= 0; i--) {
+        if (liveSegments[i].start <= time) { idx = i; break; }
+      }
+    }
+    if (idx === liveRecActiveIdx) return;
+    liveRecActiveIdx = idx;
+
+    const list = document.getElementById("liveSegmentList");
+    if (!list) return;
+    list.querySelectorAll(".rec-active").forEach(el => el.classList.remove("rec-active"));
+    if (idx < 0) return;
+    const inner = list.querySelector(`[data-seg-idx="${idx}"]`);
+    if (!inner) return;
+    const target = inner.closest(".segment-item") || inner;
+    target.classList.add("rec-active");
+    // Keep it centered within the list container (not the whole page).
+    const r = target.getBoundingClientRect();
+    const lr = list.getBoundingClientRect();
+    if (r.top < lr.top || r.bottom > lr.bottom) {
+      list.scrollTop += (r.top - lr.top) - (lr.height - r.height) / 2;
+    }
+  }
+
+  // Seek the recording to a segment's timecode and play it.
+  function playRecordingAt(timeSec) {
+    const audio = document.getElementById("liveRecAudio");
+    if (!audio || !audio.src) return;
+    audio.currentTime = Math.max(0, timeSec || 0);
+    audio.play().catch(() => {});
+  }
+
   function startTimer() {
     liveStartTime = Date.now();
     liveTimerInterval = setInterval(() => {
@@ -4475,6 +4800,7 @@ function initLiveTab() {
     liveDraftAborters = {};
     clearLiveDisplay();
     liveElapsedBefore = 0;
+    resetRecording();
     renderLiveSegments();
 
     setLiveStatus("Connecting...");
@@ -4503,6 +4829,7 @@ function initLiveTab() {
     if (liveRunning) return;
 
     setLiveStatus("Reconnecting...");
+    document.getElementById("liveRecordingSection")?.classList.add("hidden");
 
     try {
       const stream = await getMediaStream();
@@ -4516,6 +4843,7 @@ function initLiveTab() {
     liveRunning = true;
     livePaused = false;
     showRunningUI();
+    renderLiveSegments();   // back to newest-first (live) order
     startTimer();
   }
 
@@ -4531,7 +4859,9 @@ function initLiveTab() {
       stopCapture(false);
     }
 
+    finalizeRecording();
     showPausedUI();
+    renderLiveSegments();   // flip to chronological (review) order
 
     // Mark existing segments as from previous session
     liveSegments.forEach(s => s._prev = true);
@@ -4547,7 +4877,9 @@ function initLiveTab() {
     livePaused = false;
     stopTimer();
     stopCapture(true);
+    finalizeRecording();
     showStoppedUI();
+    renderLiveSegments();   // flip to chronological (review) order
     setLiveStatus(`Stopped — ${liveSegments.length} segments`);
   }
 
@@ -4563,6 +4895,7 @@ function initLiveTab() {
     clearLiveDisplay();
     liveElapsedBefore = 0;
     stopCapture(false);
+    resetRecording();
     showStoppedUI();
     renderLiveSegments();
     const el = document.getElementById("liveStatus");
@@ -4575,6 +4908,20 @@ function initLiveTab() {
   if (stopBtn) stopBtn.addEventListener("click", doStop);
   if (continueBtn) continueBtn.addEventListener("click", doContinue);
   if (newBtn) newBtn.addEventListener("click", doNew);
+
+  // Recording playback: build the player once, and let clicking a transcribed
+  // line jump the recorded audio to that line's timecode.
+  initRecordingPlayer();
+  const liveListEl = document.getElementById("liveSegmentList");
+  if (liveListEl) {
+    liveListEl.addEventListener("click", (e) => {
+      // Only when a recording exists (after Stop/Pause) and not while running.
+      if (liveRunning || !liveRecBlobUrl) return;
+      const item = e.target.closest(".segment-item[data-start]");
+      if (!item) return;
+      playRecordingAt(parseFloat(item.dataset.start) || 0);
+    });
+  }
 
   // ── Live filter tabs (Speech / Translation) ──
   const liveFilterTabs = document.querySelectorAll("[data-live-filter]");

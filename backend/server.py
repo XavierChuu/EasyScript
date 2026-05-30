@@ -2808,12 +2808,21 @@ class LiveStreamProcessor:
     # On a fast GPU (RTX 30/40-series), Whisper Turbo decodes a 6s window in
     # ~200ms; we can afford a 0.4s cycle and still leave headroom.
     PARTIAL_INTERVALS = {
-        "tiny": 0.3, "base": 0.4, "small": 0.5,
-        "medium": 0.8, "large-v3-turbo": 0.4, "large-v3": 1.0,
+        "tiny": 0.25, "base": 0.3, "small": 0.4,
+        "medium": 0.7, "large-v3-turbo": 0.3, "large-v3": 0.9,
     }
 
-    SENTENCE_MAX_WORDS = 10
-    SENTENCE_MIN_WORDS_FOR_SOFT_PUNCT = 4
+    # Line grouping: put up to SENTENCES_PER_LINE complete sentences on one line
+    # so the caption reads naturally instead of breaking every sentence.
+    SENTENCES_PER_LINE = 2
+    # Safety cap on words per line (only triggers for speech without punctuation,
+    # or two very long sentences) so a line never runs away.
+    SENTENCE_MAX_WORDS = 28
+    SENTENCE_MIN_WORDS_FOR_SOFT_PUNCT = 12   # (kept for reference; soft punct no longer breaks)
+    # On a short pause (finalize), only end the line if it's already a real
+    # clause (≥ this many words). Shorter fragments stay pending and merge with
+    # the next utterance, so micro-pauses don't chop the text into tiny lines.
+    MIN_LINE_WORDS_ON_PAUSE = 8
     HARD_PUNCT = ".!?。？！"
     SOFT_PUNCT = ",;，；:"
     INITIAL_PROMPT_TAIL_CHARS = 200
@@ -2834,10 +2843,10 @@ class LiveStreamProcessor:
     # they have right-context), skip the second pass and commit on first
     # detection. Trade-off: rare possibility of wrong commit when Whisper is
     # confident but wrong on first pass.
-    HIGH_CONFIDENCE_THRESHOLD = 0.80
+    HIGH_CONFIDENCE_THRESHOLD = 0.72
     # Min seconds between word end and buffer end to consider the word "settled"
     # (i.e. Whisper has enough following audio that it's unlikely to revise it).
-    CONFIDENT_COMMIT_TAIL_SECONDS = 0.3
+    CONFIDENT_COMMIT_TAIL_SECONDS = 0.15
 
     def __init__(self, model: str = "base", language: str | None = None,
                  time_offset: float = 0.0, vad_aggressiveness: int = 2):
@@ -2989,7 +2998,8 @@ class LiveStreamProcessor:
                     if self._buffer_duration >= self.MAX_WINDOW_S:
                         action_needed = "finalize"
                     elif _time_module.time() - self._last_partial_time >= self._partial_interval:
-                        if self._buffer_duration >= 0.6:
+                        # Lower gate → first words appear sooner after speech starts.
+                        if self._buffer_duration >= 0.4:
                             action_needed = "partial"
             else:
                 self._speech_frames = 0
@@ -3024,19 +3034,23 @@ class LiveStreamProcessor:
         return tail[-self.INITIAL_PROMPT_TAIL_CHARS:]
 
     def _run_inference(self) -> list[dict]:
-        """Decode current buffer → list of words with RELATIVE timestamps."""
-        if self._buffer_duration < 0.4:
+        """Decode current buffer → list of words with RELATIVE timestamps.
+
+        Feeds the PCM samples directly to the model as a float32 numpy array —
+        no WAV file is written to disk each cycle (saves I/O + an extra audio
+        decode in mlx/faster-whisper every partial).
+        """
+        if self._buffer_duration < 0.3:
             return []
         self._ensure_transcriber()
-        tmp_path = os.path.join(UPLOAD_DIR, f"_live_{id(self)}.wav")
         try:
-            with wave.open(tmp_path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(self.SAMPLE_RATE)
-                wf.writeframes(bytes(self._speech_buffer))
+            import numpy as np
+            pcm = (
+                np.frombuffer(bytes(self._speech_buffer), dtype=np.int16)
+                .astype(np.float32) / 32768.0
+            )
             words = self._transcriber.transcribe_buffer(
-                tmp_path,
+                pcm,
                 language=self.language,
                 initial_prompt=self._initial_prompt(),
             )
@@ -3044,11 +3058,6 @@ class LiveStreamProcessor:
         except Exception as e:
             print(f"[live] inference error: {e}")
             return []
-        finally:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
 
     @staticmethod
     def _word_key(w: dict) -> str:
@@ -3119,6 +3128,12 @@ class LiveStreamProcessor:
             "end": round(self._pending_sentence[-1]["end"], 2),
             # Index of the upcoming final_segment so frontend can pair them
             "next_index": len(self._finalized),
+            # Per-word tokens + absolute start timecodes so the frontend can
+            # reveal each word at the speaker's actual rhythm.
+            "words": [
+                {"w": w["word"], "t": round(w["start"], 3)}
+                for w in self._pending_sentence
+            ],
         }
 
     def _flush_sentence(self, force: bool = False) -> list[dict]:
@@ -3153,20 +3168,25 @@ class LiveStreamProcessor:
                 "index": len(self._finalized) - 1,
             })
 
-        # Scan committed buffer; cut at each closing boundary
+        # Scan committed buffer; group SENTENCES_PER_LINE complete sentences
+        # onto one line. A line closes when we've collected that many hard-punct
+        # sentences, OR the word cap is hit (safety so a line never runs away).
         bucket: list[dict] = []
+        sentence_count = 0
         for w in self._pending_sentence:
             bucket.append(w)
             last_char = w["word"].strip()[-1:] if w["word"].strip() else ""
             if last_char in self.HARD_PUNCT:
-                emit(bucket)
-                bucket = []
-            elif last_char in self.SOFT_PUNCT and len(bucket) >= self.SENTENCE_MIN_WORDS_FOR_SOFT_PUNCT:
-                emit(bucket)
-                bucket = []
+                sentence_count += 1
+                if sentence_count >= self.SENTENCES_PER_LINE:
+                    emit(bucket)
+                    bucket = []
+                    sentence_count = 0
             elif len(bucket) >= self.SENTENCE_MAX_WORDS:
+                # Runaway line (e.g. speech with no punctuation) — cap it.
                 emit(bucket)
                 bucket = []
+                sentence_count = 0
 
         if force:
             emit(bucket)
@@ -3251,7 +3271,8 @@ class LiveStreamProcessor:
         if draft_event:
             events.append(draft_event)
 
-        # Emit hypothesis tail as partial text
+        # Emit hypothesis tail as partial text + per-word timecodes (absolute),
+        # so the frontend can reveal each tail word at the speaker's rhythm.
         tail_text = " ".join(w["word"].strip() for w in self._prev_hypothesis).strip()
         if tail_text:
             events.append({
@@ -3259,6 +3280,10 @@ class LiveStreamProcessor:
                 "text": tail_text,
                 "start": round(self._buffer_start_time, 2),
                 "duration": round(self._buffer_duration, 1),
+                "words": [
+                    {"w": w["word"], "t": round(self._buffer_start_time + w["start"], 3)}
+                    for w in self._prev_hypothesis
+                ],
             })
         elif not events:
             # Send empty partial so frontend clears stale hypothesis
@@ -3284,14 +3309,30 @@ class LiveStreamProcessor:
         self._silence_frames = 0
         self._speech_frames = 0
         self._pending_silence_flush = False
-        self._last_draft_text = ""
         self._last_partial_time = _time_module.time()
 
-        events.extend(self._flush_sentence(force=True))
+        # Complete sentences (hard punctuation, soft-punct-at-length, or the
+        # word cap) always break inside _flush_sentence. The `force` flag only
+        # decides what to do with the TRAILING incomplete clause:
+        #   - If it's already a real clause (≥ MIN_LINE_WORDS_ON_PAUSE), end the
+        #     line here — a pause after a full clause is a natural boundary.
+        #   - If it's just a few words, keep it pending so it merges with the
+        #     next utterance instead of becoming a tiny standalone line.
+        substantial = len(self._pending_sentence) >= self.MIN_LINE_WORDS_ON_PAUSE
+        events.extend(self._flush_sentence(force=substantial))
 
-        # Always send empty partial to clear the live line
-        events.append({"type": "partial", "text": "",
-                       "start": round(self.current_time, 2), "duration": 0.0})
+        if self._pending_sentence:
+            # An unfinished clause carries across the pause — keep it on screen
+            # as the in-progress draft instead of clearing the line.
+            self._last_draft_text = ""
+            draft = self._maybe_emit_draft()
+            if draft:
+                events.append(draft)
+        else:
+            # Nothing pending — clear the live line.
+            self._last_draft_text = ""
+            events.append({"type": "partial", "text": "",
+                           "start": round(self.current_time, 2), "duration": 0.0})
         return events
 
     def flush(self) -> list[dict]:

@@ -483,8 +483,11 @@ class Transcriber:
 
     # ── Live mode: fast word-level path ──
 
-    def transcribe_buffer(self, audio_path, language=None, initial_prompt=None):
+    def transcribe_buffer(self, audio, language=None, initial_prompt=None):
         """Transcribe a short audio buffer for live streaming.
+
+        `audio` may be a file path OR a 16kHz mono float32 numpy array (the live
+        path feeds the array directly to skip a per-cycle WAV write + reload).
 
         Returns a flat list of words: [{word, start, end, probability}] with
         timestamps relative to the buffer (0 = buffer start). No hallucination
@@ -493,14 +496,14 @@ class Transcriber:
         Designed for buffers ≤ ~15s; bypasses chunking + segment-level filters.
         """
         if self.backend == "mlx":
-            return self._mlx_transcribe_buffer(audio_path, language, initial_prompt)
-        return self._fw_transcribe_buffer(audio_path, language, initial_prompt)
+            return self._mlx_transcribe_buffer(audio, language, initial_prompt)
+        return self._fw_transcribe_buffer(audio, language, initial_prompt)
 
     # Segment-level filter thresholds (live mode — looser than batch mode)
     _LIVE_NO_SPEECH_THRESH = 0.55
     _LIVE_AVG_LOGPROB_THRESH = -1.0
 
-    def _fw_transcribe_buffer(self, audio_path, language, initial_prompt):
+    def _fw_transcribe_buffer(self, audio, language, initial_prompt):
         fw_opts = dict(
             language=language,
             beam_size=1,
@@ -510,7 +513,7 @@ class Transcriber:
         )
         if initial_prompt:
             fw_opts["initial_prompt"] = initial_prompt
-        segments_iter, _info = self.model.transcribe(audio_path, **fw_opts)
+        segments_iter, _info = self.model.transcribe(audio, **fw_opts)
         words = []
         for seg in segments_iter:
             # Whisper hallucinates phrases like "Hãy subscribe...", "Thank you for
@@ -532,7 +535,7 @@ class Transcriber:
                 })
         return words
 
-    def _mlx_transcribe_buffer(self, audio_path, language, initial_prompt):
+    def _mlx_transcribe_buffer(self, audio, language, initial_prompt):
         import mlx_whisper
         opts = {
             "path_or_hf_repo": self._mlx_repo,
@@ -543,7 +546,7 @@ class Transcriber:
             opts["language"] = language
         if initial_prompt:
             opts["initial_prompt"] = initial_prompt
-        result = mlx_whisper.transcribe(audio_path, **opts)
+        result = mlx_whisper.transcribe(audio, **opts)
         words = []
         for seg in result.get("segments", []):
             no_speech = float(seg.get("no_speech_prob") or 0.0)

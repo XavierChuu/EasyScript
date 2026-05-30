@@ -903,6 +903,25 @@ body {
 .time-sep { color: var(--text-dim); margin: 0 2px; }
 .playback-spacer { flex: 1; }
 
+/* Segment highlighted while reviewing the recording (karaoke follow-along) */
+.segment-item.rec-active,
+.live-text-line.rec-active {
+  background: var(--accent-dim);
+  box-shadow: inset 3px 0 0 var(--accent);
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease;
+}
+
+/* Live recording playback seek bar */
+.rec-seek {
+  flex: 1;
+  min-width: 0;
+  height: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+#liveRecordingSection .playback-bar { gap: var(--space-8); }
+
 /* "Skip silence" review toggle in the playback bar */
 .skip-silence-toggle {
   display: flex;
@@ -2006,8 +2025,21 @@ body {
   opacity: 0.85;
 }
 .live-partial-item {
-  border-left: 2px solid var(--accent);
+  border: 1px solid var(--accent);
+  border-left: 3px solid var(--accent);
   background: var(--accent-dim);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 1px var(--accent-dim), 0 2px 12px rgba(0, 0, 0, 0.25);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+/* Placeholder text shown in the live box during brief pauses */
+.live-waiting {
+  color: var(--accent);
+  font-style: italic;
+  opacity: 0.6;
+  animation: livePulse 1.5s ease-in-out infinite;
 }
 .live-partial-label {
   color: var(--accent);

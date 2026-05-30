@@ -563,6 +563,29 @@
       </div>
     </div>
 
+    <!-- Live recording playback (appears above Segments after Stop/Pause) -->
+    <div class="section hidden" id="liveRecordingSection">
+      <div class="section-header">
+        <span class="section-label">Recording</span>
+        <span class="section-count" id="liveRecHint">Click a line to jump</span>
+      </div>
+      <div class="section-body">
+        <div class="playback-bar">
+          <button class="btn-playback" id="liveRecPlayBtn" title="Play/Pause">
+            <span id="liveRecPlayIcon">&#9654;</span>
+          </button>
+          <div class="playback-time">
+            <span id="liveRecCurrent">0:00</span>
+            <span class="time-sep">/</span>
+            <span id="liveRecTotal">0:00</span>
+          </div>
+          <input type="range" class="rec-seek" id="liveRecSeek" min="0" max="100" value="0" step="0.1" />
+          <a class="btn btn-xs" id="liveRecDownload" download="easyscript-live.wav" title="Download audio">Save</a>
+        </div>
+        <audio id="liveRecAudio" preload="auto"></audio>
+      </div>
+    </div>
+
     <!-- Live Segments -->
     <div class="section" id="liveSegmentsSection">
       <div class="section-header">
