@@ -611,9 +611,63 @@ body {
 }
 
 /* Always-visible status under the action buttons — indent so it's not flush
-   with the panel edge. */
+   with the panel edge. The gear icon sits right-aligned on the same line. */
 .action-status {
-  padding: 0 var(--space-10);
+  padding: var(--space-4, 4px) var(--space-14, 14px) var(--space-12);
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+.action-status .model-info {
+  flex: 1;
+  min-width: 0;
+}
+.action-status #settingsBtn {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* ── Settings popup overlay ── */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-16, 16px);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(2px);
+}
+.settings-panel {
+  width: 100%;
+  max-width: 440px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-section);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-general);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.settings-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-12) var(--space-14, 14px);
+  border-bottom: 1px solid var(--border);
+}
+.settings-panel-body {
+  padding: var(--space-14, 14px);
+  overflow-y: auto;
+}
+
+/* Horizontal divider separating settings subsections */
+.settings-divider {
+  height: 1px;
+  background: var(--border-strong);
+  margin: var(--space-14, 14px) 0;
 }
 .action-extra-row {
   padding: 0 var(--space-10);
@@ -848,6 +902,25 @@ body {
 }
 .time-sep { color: var(--text-dim); margin: 0 2px; }
 .playback-spacer { flex: 1; }
+
+/* "Skip silence" review toggle in the playback bar */
+.skip-silence-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.skip-silence-toggle input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
 
 .zoom-controls {
   display: flex;

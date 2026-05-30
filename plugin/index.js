@@ -564,6 +564,7 @@ const audioPlayback = {
   audio: null,
   playing: false,
   animFrame: null,
+  skipSilence: false,
 
   init() {
     this.audio = document.getElementById("audioPlayer");
@@ -577,7 +578,15 @@ const audioPlayback = {
     playBtn.addEventListener("click", () => this.togglePlay());
     stopBtn.addEventListener("click", () => this.stop());
 
+    const skipCheck = document.getElementById("skipSilenceCheck");
+    if (skipCheck) {
+      skipCheck.addEventListener("change", () => { this.skipSilence = skipCheck.checked; });
+    }
+
     this.audio.addEventListener("timeupdate", () => {
+      if (this.playing && this.skipSilence && this.maybeSkipSilence(this.audio.currentTime)) {
+        return; // jumped past a silence region; next timeupdate continues
+      }
       waveform.setPlayhead(this.audio.currentTime);
       this.updateTimeUI();
       this.autoFocusSegment(this.audio.currentTime);
@@ -631,6 +640,28 @@ const audioPlayback = {
     this.audio.currentTime = time;
     waveform.setPlayhead(time);
     this.updateTimeUI();
+  },
+
+  // When "Skip silence" is on, jump over any detected silence/breath cut region
+  // the playhead enters, so review only plays the kept (speech) parts.
+  // Returns true if a jump happened.
+  maybeSkipSilence(time) {
+    const cuts = getFilteredCutPoints();
+    if (!cuts || cuts.length === 0) return false;
+    for (const cut of cuts) {
+      // Small epsilon so we trigger right as we cross into the region.
+      if (time >= cut.start - 0.02 && time < cut.end - 0.05) {
+        const target = Math.min(cut.end + 0.01, this.audio.duration || cut.end);
+        if (target > this.audio.currentTime) {
+          this.audio.currentTime = target;
+          waveform.setPlayhead(target);
+          this.updateTimeUI();
+          this.autoFocusSegment(target);
+        }
+        return true;
+      }
+    }
+    return false;
   },
 
   animatePlayhead() {
@@ -698,7 +729,7 @@ const audioPlayback = {
 
 const zoomState = {
   level: 1,
-  levels: [1, 2, 4, 8, 16],
+  levels: [1, 2, 4, 8, 16, 32, 64],
 
   init() {
     document.getElementById("zoomInBtn").addEventListener("click", () => this.zoomIn());
@@ -719,16 +750,38 @@ const zoomState = {
   zoomFit() { this.setZoom(1); },
 
   setZoom(level) {
-    this.level = level;
-    document.getElementById("zoomLevel").textContent = `${level}x`;
     const scroll = document.getElementById("waveformScroll");
     const wrap = document.getElementById("waveformWrap");
     const overview = document.getElementById("waveformOverview");
+
+    // ── Preserve the current viewing position when zooming ──
+    // Anchor on the playhead if it is inside the current viewport; otherwise
+    // anchor on the center of what the user is currently looking at.
+    const oldScrollW = wrap.scrollWidth || scroll.clientWidth || 1;
+    let anchorRatio = (scroll.scrollLeft + scroll.clientWidth / 2) / oldScrollW;
+    if (waveform.duration > 0) {
+      const phRatio = waveform.playheadPos / waveform.duration;
+      const phX = phRatio * oldScrollW;
+      if (phX >= scroll.scrollLeft && phX <= scroll.scrollLeft + scroll.clientWidth) {
+        anchorRatio = phRatio;
+      }
+    }
+    anchorRatio = Math.max(0, Math.min(1, anchorRatio));
+
+    this.level = level;
+    document.getElementById("zoomLevel").textContent = `${level}x`;
     const containerWidth = scroll.clientWidth;
     wrap.style.width = level === 1 ? "100%" : `${containerWidth * level}px`;
     if (level > 1) { overview.classList.remove("hidden"); }
     else { overview.classList.add("hidden"); }
     waveform.draw();
+
+    // Restore the anchor point, centered in the viewport.
+    const newScrollW = wrap.scrollWidth || containerWidth;
+    if (level > 1) {
+      scroll.scrollLeft = anchorRatio * newScrollW - scroll.clientWidth / 2;
+    }
+
     overviewMinimap.draw();
     overviewMinimap.updateViewport();
   },
@@ -788,7 +841,11 @@ const overviewMinimap = {
       const time = (i / totalBars) * waveform.duration;
       const seg = segments.find((s) => time >= s.start && time < s.end);
       const type = seg ? seg.type : "speech";
-      ctx.fillStyle = waveform.colors[type] || waveform.colors.speech;
+      let col = waveform.colors[type] || waveform.colors.speech;
+      if (type === "speech" && hasSpeakers && seg && seg.speaker) {
+        col = SPEAKER_WAVE_COLORS[getSpeakerColorIndex(seg.speaker)] || col;
+      }
+      ctx.fillStyle = col;
       ctx.globalAlpha = 0.6;
       ctx.fillRect(x, mid - barH, 1, barH);
       ctx.fillRect(x, mid, 1, barH);
@@ -948,8 +1005,14 @@ const waveform = {
       const val = this.peaks[peakIdx] || 0;
       const barH = Math.max(1, val * (h * 0.42));
       const x = i * step;
-      const type = segLookup[i] || "speech";
-      ctx.fillStyle = this.colors[type] || this.colors.speech;
+      const seg = segLookup[i];
+      const type = seg ? seg.type : "speech";
+      let color = this.colors[type] || this.colors.speech;
+      // After diarization, tint speech bars by their speaker.
+      if (type === "speech" && hasSpeakers && seg && seg.speaker) {
+        color = SPEAKER_WAVE_COLORS[getSpeakerColorIndex(seg.speaker)] || color;
+      }
+      ctx.fillStyle = color;
       ctx.globalAlpha = type === "speech" ? 0.85 : 0.5;
       ctx.fillRect(x, mid - barH, barWidth, barH);
       ctx.fillRect(x, mid, barWidth, barH);
@@ -957,7 +1020,7 @@ const waveform = {
     ctx.globalAlpha = 1;
   },
 
-  // Pre-compute segment type per bar for O(n) instead of O(n*m)
+  // Pre-compute the segment per bar for O(n) instead of O(n*m)
   _buildSegLookup(totalBars) {
     const lookup = new Array(totalBars);
     if (segments.length === 0 || this.duration <= 0) return lookup;
@@ -968,7 +1031,7 @@ const waveform = {
       // Advance segment index
       while (segIdx < segments.length && segments[segIdx].end <= time) segIdx++;
       if (segIdx < segments.length && segments[segIdx].start <= time) {
-        lookup[i] = segments[segIdx].type;
+        lookup[i] = segments[segIdx];
       }
     }
     return lookup;
@@ -1053,6 +1116,17 @@ function getSpeakerColorIndex(speakerId) {
   const idx = speakers.indexOf(speakerId);
   return idx >= 0 ? idx % 6 : 0;
 }
+
+// Solid speaker colors for the waveform canvas — matches the speaker-tag
+// palette (data-color 0..5) used in the Segments/Translation views.
+const SPEAKER_WAVE_COLORS = [
+  "#4dcafa", // code blue
+  "#e96b34", // vapi orange
+  "#9977ff", // electric violet
+  "#62f6b5", // vapi mint
+  "#ffdd03", // vivid yellow
+  "#de94e2", // neon pink
+];
 
 /**
  * Split a speech segment's text based on display settings.
@@ -2015,41 +2089,41 @@ function getKeptSegments() {
   if (cursor < waveform.duration) rawKept.push({ start: cursor, end: waveform.duration });
   if (rawKept.length === 0) rawKept = [{ start: 0, end: waveform.duration }];
 
-  // Step 2: If speakers detected, split kept ranges at speaker boundaries
+  // Step 2: If speakers detected, cut ONLY where the speaker changes.
+  // A single speaker talking with natural pauses between sentences should
+  // stay as ONE clip — we do NOT cut at every silence gap within one
+  // speaker's turn. Cuts happen exclusively at speaker-change boundaries.
   if (!hasSpeakers) return rawKept;
 
-  const speechSegs = segments.filter(s => s.type === "speech" && s.speaker);
+  const speechSegs = segments
+    .filter(s => s.type === "speech" && s.speaker)
+    .sort((a, b) => a.start - b.start);
   if (speechSegs.length === 0) return rawKept;
 
+  // Group consecutive same-speaker segments into speaker turns.
+  const turns = [];
+  let cur = { speaker: speechSegs[0].speaker, start: speechSegs[0].start, end: speechSegs[0].end };
+  for (let i = 1; i < speechSegs.length; i++) {
+    const s = speechSegs[i];
+    if (s.speaker === cur.speaker) {
+      cur.end = Math.max(cur.end, s.end);
+    } else {
+      turns.push(cur);
+      cur = { speaker: s.speaker, start: s.start, end: s.end };
+    }
+  }
+  turns.push(cur);
+
+  // One clip per speaker turn. Cut points sit at the midpoint between the end
+  // of one turn and the start of the next (i.e. exactly where the speaker
+  // changes), and the clips cover the full timeline with no internal cuts.
   const result = [];
-  for (const kept of rawKept) {
-    // Find all speech segments that overlap this kept range
-    const overlapping = speechSegs.filter(s => s.end > kept.start && s.start < kept.end);
-
-    if (overlapping.length <= 1) {
-      result.push(kept);
-      continue;
-    }
-
-    // Check if speaker changes within this kept range → add split points
-    let prevSpeaker = null;
-    let subStart = kept.start;
-
-    for (const seg of overlapping) {
-      const clampedStart = Math.max(seg.start, kept.start);
-      const clampedEnd = Math.min(seg.end, kept.end);
-
-      if (prevSpeaker !== null && seg.speaker !== prevSpeaker && clampedStart > subStart) {
-        // Speaker changed — create split at this boundary
-        result.push({ start: subStart, end: clampedStart });
-        subStart = clampedStart;
-      }
-      prevSpeaker = seg.speaker;
-    }
-    // Push final sub-segment
-    if (kept.end > subStart) {
-      result.push({ start: subStart, end: kept.end });
-    }
+  for (let i = 0; i < turns.length; i++) {
+    const start = i === 0 ? 0 : (turns[i - 1].end + turns[i].start) / 2;
+    const end = i === turns.length - 1
+      ? waveform.duration
+      : (turns[i].end + turns[i + 1].start) / 2;
+    result.push({ start, end, speaker: turns[i].speaker });
   }
 
   return result;
@@ -2562,108 +2636,36 @@ async function exportSrtAfterCuts() {
  * so the editor can assign cameras per clip.
  */
 function splitAndAssignSpeakers(diarizeRaw) {
-  const newSegments = [];
-
+  // A single Whisper segment = one complete sentence/phrase. Whisper breaks at
+  // natural pauses, so its sentence boundaries are far more trustworthy than
+  // pyannote's frame-level turn boundaries (which often slip a fraction of a
+  // second into a sentence). Splitting a sentence mid-way produces the bug
+  // where "Tôi" → Speaker A and "là một bác sĩ" → Speaker B.
+  //
+  // Therefore we NEVER split a Whisper segment. Each sentence is attributed
+  // whole to the speaker who occupies the most of it (dominant overlap).
   for (const seg of segments) {
-    if (seg.type !== "speech") {
-      newSegments.push(seg);
-      continue;
-    }
+    if (seg.type !== "speech") continue;
 
-    // Find all diarize segments that overlap with this speech segment
-    const overlapping = diarizeRaw.filter(d =>
-      d.end > seg.start && d.start < seg.end
-    ).sort((a, b) => a.start - b.start);
-
-    if (overlapping.length <= 1) {
-      // Single or no speaker — just assign
-      const spk = overlapping.length === 1 ? overlapping[0].speaker : "UNKNOWN";
-      seg.speaker = spk;
-      seg.speakerLabel = speakerMap[spk] || "Unknown";
-      newSegments.push(seg);
-      continue;
-    }
-
-    // Multiple speakers within one speech segment — need to split
-    // Group consecutive diarize segments by speaker to avoid over-splitting
-    const groups = [];
-    let currentGroup = { speaker: overlapping[0].speaker, start: overlapping[0].start, end: overlapping[0].end };
-    for (let i = 1; i < overlapping.length; i++) {
-      if (overlapping[i].speaker === currentGroup.speaker) {
-        currentGroup.end = Math.max(currentGroup.end, overlapping[i].end);
-      } else {
-        groups.push(currentGroup);
-        currentGroup = { speaker: overlapping[i].speaker, start: overlapping[i].start, end: overlapping[i].end };
+    // Sum overlap duration per speaker across the whole sentence.
+    const overlapBySpeaker = {};
+    for (const d of diarizeRaw) {
+      const ov = Math.min(d.end, seg.end) - Math.max(d.start, seg.start);
+      if (ov > 0) {
+        overlapBySpeaker[d.speaker] = (overlapBySpeaker[d.speaker] || 0) + ov;
       }
     }
-    groups.push(currentGroup);
 
-    if (groups.length <= 1) {
-      // After grouping, only one speaker
-      seg.speaker = groups[0].speaker;
-      seg.speakerLabel = speakerMap[groups[0].speaker] || "Unknown";
-      newSegments.push(seg);
-      continue;
+    let dominant = null, best = 0;
+    for (const spk in overlapBySpeaker) {
+      if (overlapBySpeaker[spk] > best) { best = overlapBySpeaker[spk]; dominant = spk; }
     }
 
-    // ── Guard against pyannote boundary slipping mid-sentence ─────────────
-    // pyannote's turn boundaries aren't word-precise. If Whisper produced
-    // ONE segment for ONE sentence ("When do we get to fight this guy?")
-    // but the turn boundary lands 0.2s into it, splitting proportionally
-    // gives "When" → A, rest → B. That's almost always wrong: Whisper's
-    // own sentence boundary is more trustworthy than pyannote's word
-    // alignment. Only split if EVERY sub-segment is substantial — at
-    // least MIN_SUB_DURATION AND at least MIN_SUB_FRACTION of the parent.
-    // Otherwise, attribute the whole sentence to the dominant speaker.
-    const segDuration = seg.end - seg.start;
-    const MIN_SUB_DURATION = 1.0;   // seconds
-    const MIN_SUB_FRACTION = 0.25;  // 25% of parent segment
-    const groupSpan = (g) => Math.min(g.end, seg.end) - Math.max(g.start, seg.start);
-    const everySubstantial = groups.every(g => {
-      const span = groupSpan(g);
-      return span >= MIN_SUB_DURATION && span >= segDuration * MIN_SUB_FRACTION;
-    });
-
-    if (!everySubstantial) {
-      const dominant = groups.reduce((best, g) =>
-        groupSpan(g) > groupSpan(best) ? g : best, groups[0]);
-      seg.speaker = dominant.speaker;
-      seg.speakerLabel = speakerMap[dominant.speaker] || "Unknown";
-      newSegments.push(seg);
-      continue;
-    }
-
-    // Both/all sides are substantial → safe to split proportionally.
-    const words = (seg.text || "").split(/\s+/).filter(w => w);
-
-    for (let g = 0; g < groups.length; g++) {
-      const grp = groups[g];
-      // Clamp to speech segment boundaries
-      const subStart = Math.max(grp.start, seg.start);
-      const subEnd = Math.min(grp.end, seg.end);
-      if (subEnd <= subStart) continue;
-
-      // Distribute words proportionally by duration
-      const startRatio = (subStart - seg.start) / segDuration;
-      const endRatio = (subEnd - seg.start) / segDuration;
-      const wordStart = Math.round(startRatio * words.length);
-      const wordEnd = Math.round(endRatio * words.length);
-      const subText = words.slice(wordStart, wordEnd).join(" ");
-
-      newSegments.push({
-        type: "speech",
-        start: round3(subStart),
-        end: round3(subEnd),
-        text: subText,
-        speaker: grp.speaker,
-        speakerLabel: speakerMap[grp.speaker] || "Unknown",
-        language: seg.language,
-      });
-    }
+    seg.speaker = dominant || "UNKNOWN";
+    seg.speakerLabel = dominant ? (speakerMap[dominant] || "Unknown") : "Unknown";
   }
 
-  // Replace global segments
-  segments = newSegments.sort((a, b) => a.start - b.start);
+  segments = segments.sort((a, b) => a.start - b.start);
 }
 
 function round3(n) { return Math.round(n * 1000) / 1000; }
@@ -3058,13 +3060,19 @@ function initCutControlsToggle() {
 // ── Settings ──
 
 function initSettings() {
-  // Toggle settings section
-  document.getElementById("settingsToggle").addEventListener("click", () => {
-    const body = document.getElementById("settingsBody");
-    const chevron = document.getElementById("settingsChevron");
-    const isOpen = !body.classList.contains("hidden");
-    body.classList.toggle("hidden");
-    chevron.innerHTML = isOpen ? "&#9654;" : "&#9660;";
+  // Settings popup overlay open/close
+  const settingsOverlay = document.getElementById("settingsOverlay");
+  const openSettings = () => settingsOverlay.classList.remove("hidden");
+  const closeSettings = () => settingsOverlay.classList.add("hidden");
+  document.getElementById("settingsBtn").addEventListener("click", openSettings);
+  document.getElementById("settingsCloseBtn").addEventListener("click", closeSettings);
+  // Click on the dim backdrop (outside the panel) closes the popup
+  settingsOverlay.addEventListener("click", (e) => {
+    if (e.target === settingsOverlay) closeSettings();
+  });
+  // Escape key closes the popup
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !settingsOverlay.classList.contains("hidden")) closeSettings();
   });
 
 
@@ -3383,7 +3391,6 @@ document.getElementById("transcribeBtn").addEventListener("contextmenu", (e) => 
   showTranscribeModeDialog(playheadTime > 1);
 });
 document.getElementById("diarizeBtn").addEventListener("click", runDiarize);
-document.getElementById("previewBtn").addEventListener("click", previewCuts);
 document.getElementById("exportXmlBtn").addEventListener("click", exportXML);
 document.getElementById("exportSrtOrigBtn").addEventListener("click", exportSrtOriginal);
 document.getElementById("exportSrtCutBtn").addEventListener("click", exportSrtAfterCuts);

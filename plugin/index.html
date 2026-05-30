@@ -63,6 +63,9 @@
       <!-- Always-visible status: which model is loaded + which device (GPU/CPU) -->
       <div class="action-status">
         <div class="model-info" id="modelInfo"></div>
+        <button class="btn-icon-sm" id="settingsBtn" title="Settings">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
       </div>
     </div>
 
@@ -90,13 +93,14 @@
       </label>
     </div>
 
-    <!-- Settings (single collapsible — Transcribe + Speakers + Translation) -->
-    <div class="section" id="settingsSection">
-      <div class="section-header clickable" id="settingsToggle">
-        <span class="section-label">Settings</span>
-        <span class="section-count" id="settingsChevron">&#9654;</span>
-      </div>
-      <div class="section-body hidden" id="settingsBody">
+    <!-- Settings popup overlay (Transcribe + Speakers + Translation) -->
+    <div class="settings-overlay hidden" id="settingsOverlay">
+      <div class="settings-panel">
+        <div class="settings-panel-header">
+          <span class="section-label">Settings</span>
+          <button class="btn-icon-sm" id="settingsCloseBtn" title="Close">&#10005;</button>
+        </div>
+        <div class="settings-panel-body" id="settingsBody">
         <!-- Transcribe subsection -->
         <div class="settings-subsection-label">Transcribe</div>
         <div class="select-row">
@@ -161,7 +165,8 @@
         </div>
 
         <!-- Speakers subsection -->
-        <div class="settings-subsection-label" style="margin-top:12px">Speakers</div>
+        <div class="settings-divider"></div>
+        <div class="settings-subsection-label">Speakers</div>
         <div class="control-row">
           <label class="control-label">HF Token</label>
           <input type="password" class="input-text" id="hfTokenInput" placeholder="hf_..." style="flex:1" />
@@ -182,7 +187,8 @@
         </div>
 
         <!-- Translation subsection -->
-        <div class="settings-subsection-label" style="margin-top:12px">Translation</div>
+        <div class="settings-divider"></div>
+        <div class="settings-subsection-label">Translation</div>
         <div class="control-row">
           <label class="control-label">Provider</label>
           <select class="input-select" id="translationProvider" style="flex:1">
@@ -243,6 +249,7 @@
         <div class="btn-row mt-8">
           <button class="btn btn-primary btn-block" id="saveSettingsBtn">Save Settings</button>
         </div>
+        </div>
       </div>
     </div>
 
@@ -277,9 +284,6 @@
           <input type="range" class="control-slider" id="silenceThresh" min="-60" max="-15" value="-30" step="1" />
           <span class="control-value" id="silenceThreshVal">-30dB</span>
         </div>
-        <div class="btn-row">
-          <button class="btn" id="previewBtn">Preview Cuts</button>
-        </div>
         <span class="section-count" id="cutStats"></span>
       </div>
       <div class="section-body waveform-body">
@@ -294,6 +298,10 @@
             <span class="time-sep">/</span>
             <span id="totalTime">0:00.00</span>
           </div>
+          <label class="skip-silence-toggle" id="skipSilenceLabel" title="Skip detected silence while playing (review only)">
+            <input type="checkbox" id="skipSilenceCheck" />
+            <span>Skip silence</span>
+          </label>
           <div class="playback-spacer"></div>
           <div class="zoom-controls">
             <button class="btn-playback btn-sm" id="zoomOutBtn" title="Zoom out">-</button>

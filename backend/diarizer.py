@@ -248,6 +248,21 @@ class Diarizer:
                 use_auth_token=self.hf_token,
             )
 
+        # pyannote returns None (instead of raising) when the token can't access
+        # the gated model — usually because the user hasn't accepted the model's
+        # license terms on HuggingFace. Surface a clear, actionable error rather
+        # than letting it blow up later as "'NoneType' object is not callable".
+        if self.pipeline is None:
+            raise ValueError(
+                "Cannot access the speaker diarization model. Your HuggingFace "
+                "token is valid, but you must accept the user conditions for "
+                "BOTH models (one click each, while logged in):\n"
+                "  1) https://hf.co/pyannote/speaker-diarization-3.1\n"
+                "  2) https://hf.co/pyannote/segmentation-3.0\n"
+                "Then click Speakers again. Also make sure the token has 'Read' "
+                "access to public gated repos."
+            )
+
         # Use GPU when available (CUDA or MPS)
         if self.device in ("cuda", "mps"):
             self.pipeline.to(torch.device(self.device))
