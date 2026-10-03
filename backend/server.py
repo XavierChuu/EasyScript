@@ -17,13 +17,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+import re
+import uuid
+
 from transcriber import Transcriber, is_model_cached, MODEL_SIZES
 from silence_detector import SilenceDetector
 from diarizer import Diarizer
 from translator import get_translator, OllamaTranslator, HyMT2Translator, NLLBTranslator
 from ffmpeg_utils import run_ffmpeg, run_silent, get_ffmpeg_exe
+import security
+import waveform as waveform_data
+import beat_tracker
+import xml_cut
 
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "easyscript_uploads")
+WAVEFORM_CACHE_DIR = os.path.join(UPLOAD_DIR, "_waveform")
 SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".easyscript", "settings.json")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
@@ -53,7 +61,13 @@ AVAILABLE_MODELS = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Lazy-load: don't block server startup with model loading
+    # Publish the access token for the panel before the first request is
+    # served (the panel polls /health, then reads the token file).
+    # Models stay lazy: don't block startup with model loading.
+    try:
+        security.write_token_file(int(os.environ.get("PORT", "9876")))
+    except Exception as e:
+        print(f"[security] could not write token file: {e}")
     yield
 
 
@@ -68,11 +82,15 @@ def _ensure_transcriber():
         device = os.environ.get("WHISPER_DEVICE", "auto")
         transcriber = Transcriber(model_size=model_size, device=device)
 
+# Order matters: the middleware added last runs first. CORS is outermost so it
+# answers preflights and decorates the auth layer's 401s; the auth layer then
+# rejects every request without the session token (see security.py).
+app.add_middleware(security.LocalAccessMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origin_regex=security.CORS_ORIGIN_REGEX,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-EasyScript-Token"],
 )
 
 
@@ -190,63 +208,12 @@ def get_audio_duration(audio_path):
     return _get_dur(audio_path)
 
 def generate_peaks(audio_path, num_peaks=800):
-    """Generate waveform peaks using ffmpeg raw PCM output.
-    For long files (>10min), uses lower sample rate to keep memory and time reasonable.
-    """
-    import struct
+    """Normalized 0..1 peak list (the old /peaks format), built from the
+    numpy waveform overview — one decode, cached, instead of a Python loop
+    over every sample."""
     try:
-        duration = get_audio_duration(audio_path) or 0
-
-        # Adaptive sample rate: lower for longer files to keep data size manageable
-        if duration <= 600:
-            sample_rate = 8000
-        elif duration <= 1800:
-            sample_rate = 4000
-        elif duration <= 7200:
-            sample_rate = 2000
-        else:
-            sample_rate = 1000
-
-        # Timeout scales with duration: minimum 30s, ~1s per minute of audio
-        timeout = max(30, int(duration / 60) + 15)
-
-        result = run_ffmpeg(
-            ["-i", audio_path, "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"],
-            capture_output=True, timeout=timeout,
-        )
-        raw = result.stdout
-        if not raw:
-            return []
-
-        # Parse 16-bit signed samples
-        sample_count = len(raw) // 2
-        samples = struct.unpack(f"<{sample_count}h", raw[:sample_count * 2])
-
-        chunk_size = max(1, sample_count // num_peaks)
-        peaks = []
-        max_val = 1
-
-        # First pass: find global max
-        for i in range(0, sample_count, chunk_size):
-            chunk = samples[i:i + chunk_size]
-            val = max(abs(min(chunk)), abs(max(chunk)))
-            if val > max_val:
-                max_val = val
-
-        # Second pass: normalize
-        for i in range(num_peaks):
-            start = i * chunk_size
-            end = min(start + chunk_size, sample_count)
-            if start >= sample_count:
-                break
-            chunk = samples[start:end]
-            peak = max(abs(min(chunk)), abs(max(chunk))) / max_val
-            peaks.append(round(peak, 4))
-
+        peaks, _duration = waveform_data.legacy_peaks(audio_path, WAVEFORM_CACHE_DIR, num_peaks)
         return peaks
-    except subprocess.TimeoutExpired:
-        print(f"[peaks] Timeout generating peaks for {audio_path}")
-        return []
     except Exception as e:
         print(f"[peaks] Error: {e}")
         return []
@@ -307,17 +274,34 @@ def switch_model(req: SwitchModelRequest):
 # ── Upload & Serve Audio ──
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".mxf", ".webm", ".flv", ".wmv", ".m4v"}
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".aif", ".aiff",
+                    ".caf", ".wma", ".m4b", ".amr"}
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS | {".mts", ".m2ts", ".ts", ".3gp", ".mpg", ".mpeg"}
+
+
+def _safe_upload_name(filename):
+    """Client-supplied names must never steer the write path: an absolute name
+    makes os.path.join drop UPLOAD_DIR, and '..' climbs out of it. Keep only a
+    sanitized basename, prefixed so concurrent uploads can't collide."""
+    base = os.path.basename((filename or "").replace("\\", "/")).strip()
+    base = re.sub(r"[^\w.\- ]+", "_", base).strip(" .") or "upload"
+    stem, ext = os.path.splitext(base)
+    return f"{uuid.uuid4().hex[:8]}_{stem[:100]}{ext[:10]}"
+
 
 @app.post("/upload")
 async def upload_audio(file: UploadFile = File(...)):
-    save_path = os.path.join(UPLOAD_DIR, file.filename)
+    safe_name = _safe_upload_name(file.filename)
+    save_path = os.path.join(UPLOAD_DIR, safe_name)
+    if os.path.dirname(os.path.abspath(save_path)) != os.path.abspath(UPLOAD_DIR):
+        return JSONResponse(status_code=400, content={"error": "Invalid filename"})
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
     # If video file, extract audio track to WAV for processing & playback
-    ext = os.path.splitext(file.filename)[1].lower()
+    ext = os.path.splitext(safe_name)[1].lower()
     if ext in VIDEO_EXTENSIONS:
-        wav_name = os.path.splitext(file.filename)[0] + "_audio.wav"
+        wav_name = os.path.splitext(safe_name)[0] + "_audio.wav"
         wav_path = os.path.join(UPLOAD_DIR, wav_name)
         try:
             run_ffmpeg(
@@ -337,8 +321,10 @@ async def upload_audio(file: UploadFile = File(...)):
 
 @app.get("/audio")
 def serve_audio(path: str):
-    if not os.path.isfile(path):
-        return JSONResponse(status_code=404, content={"error": f"File not found: {path}"})
+    # Token-gated like everything else; additionally only media files are
+    # served, so even a leaked token can't read documents or keys.
+    if not os.path.isfile(path) or os.path.splitext(path)[1].lower() not in MEDIA_EXTENSIONS:
+        return JSONResponse(status_code=404, content={"error": "Media file not found"})
     import mimetypes
     mime, _ = mimetypes.guess_type(path)
     return FileResponse(path, media_type=mime or "audio/mpeg")
@@ -358,6 +344,226 @@ def peaks_only(req: PeaksRequest):
     duration = get_audio_duration(audio_path) or 0
     pks = generate_peaks(audio_path, num_peaks=req.num_peaks)
     return {"peaks": pks, "audio_duration": round(duration, 1)}
+
+
+class TrimRequest(BaseModel):
+    audio_path: str
+    start: float = 0.0
+    end: float = 0.0
+    normalize: bool = False
+
+
+def _peak_normalize(path):
+    """Peak-normalize a WAV so its loudest point sits near -1 dBFS, preserving
+    dynamics. Premiere's rendered mixdown is often quiet (mono downmix / master
+    gain), which breaks the dB-based silence threshold; this restores a usable
+    level. Returns the (possibly new) path."""
+    import subprocess as _sp, re as _re
+    try:
+        proc = _sp.run([get_ffmpeg_exe(), "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+                       capture_output=True, text=True)
+        m = _re.search(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", proc.stderr or "")
+        if not m:
+            return path
+        maxv = float(m.group(1))
+        gain = (-maxv) - 1.0  # bring peak to -1 dBFS
+        if gain <= 0.5:
+            return path  # already loud enough
+        norm = path[:-4] + "_norm.wav" if path.endswith(".wav") else path + "_norm.wav"
+        run_ffmpeg(["-y", "-i", path, "-af", f"volume={gain:.1f}dB", norm])
+        if os.path.isfile(norm):
+            try: os.remove(path)
+            except OSError: pass
+            return norm
+    except Exception as e:
+        print(f"[trim] normalize failed: {e}")
+    return path
+
+
+@app.post("/trim")
+def trim_audio(req: TrimRequest):
+    """Extract [start, end] of a source file to a temp 16k mono WAV. Used by the
+    Premiere extension so analysis runs on EXACTLY the selected/trimmed clip
+    (respecting in/out points) instead of the whole original source. When
+    `normalize` is set (e.g. for a Premiere render), the result is peak-normalized."""
+    import time as _t
+    if not os.path.isfile(req.audio_path):
+        return JSONResponse(status_code=400, content={"error": f"File not found: {req.audio_path}"})
+    src = ensure_accessible(req.audio_path)
+    start = max(0.0, float(req.start or 0.0))
+    dur = (float(req.end) - float(req.start)) if (req.end and req.end > req.start) else 0.0
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    out = os.path.join(UPLOAD_DIR, f"_trim_{int(_t.time() * 1000)}.wav")
+    args = ["-y", "-ss", f"{start:.3f}"]
+    if dur > 0:
+        args += ["-t", f"{dur:.3f}"]
+    args += ["-i", src, "-vn", "-ac", "1", "-ar", "16000", out]
+    try:
+        run_ffmpeg(args)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"trim failed: {e}"})
+    if not os.path.isfile(out):
+        return JSONResponse(status_code=500, content={"error": "trim produced no file"})
+    if req.normalize:
+        out = _peak_normalize(out)
+    real_dur = get_audio_duration(out) or dur
+    return {"path": out, "audio_duration": round(real_dur, 3)}
+
+
+# ── Background jobs (id-addressed) ──
+# Newer endpoints use per-job state instead of one global progress dict per
+# feature, so a stale job can never report into a new one, and Cancel works.
+
+_jobs = {}
+_jobs_lock = threading.Lock()
+
+
+class JobCancelled(Exception):
+    pass
+
+
+def _new_job(kind):
+    job = {"id": uuid.uuid4().hex[:12], "kind": kind, "status": "processing",
+           "progress": 0.0, "stage": "starting", "detail": "", "created": _time_module.time()}
+    with _jobs_lock:
+        cutoff = _time_module.time() - 3600
+        for jid in [j for j, v in _jobs.items() if v["created"] < cutoff and v["status"] != "processing"]:
+            _jobs.pop(jid, None)
+        _jobs[job["id"]] = job
+    return job
+
+
+def _job_progress(job):
+    def report(p, detail=""):
+        if job.get("cancel"):
+            raise JobCancelled()
+        job.update({"progress": round(float(p), 3), "stage": job["kind"], "detail": detail})
+    return report
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str):
+    job = _jobs.get(job_id)
+    if not job:
+        return JSONResponse(status_code=404, content={"error": "Unknown job"})
+    return {k: v for k, v in job.items() if k != "cancel"}
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    job = _jobs.get(job_id)
+    if not job:
+        return JSONResponse(status_code=404, content={"error": "Unknown job"})
+    job["cancel"] = True
+    return {"status": "cancelling"}
+
+
+# ── Waveform (multi-resolution peaks for the canvas renderer) ──
+
+class WaveformRequest(BaseModel):
+    audio_path: str
+    bins_per_sec: Optional[int] = None
+
+
+class WaveformSliceRequest(BaseModel):
+    audio_path: str
+    start: float
+    end: float
+    bins: int = 1000
+    peak: Optional[int] = None
+
+
+@app.post("/waveform")
+def waveform_overview(req: WaveformRequest):
+    if not os.path.isfile(req.audio_path):
+        return JSONResponse(status_code=400, content={"error": "File not found"})
+    try:
+        return waveform_data.overview(ensure_accessible(req.audio_path), WAVEFORM_CACHE_DIR,
+                                      bins_per_sec=req.bins_per_sec)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"waveform failed: {e}"})
+
+
+@app.post("/waveform/slice")
+def waveform_slice(req: WaveformSliceRequest):
+    if not os.path.isfile(req.audio_path):
+        return JSONResponse(status_code=400, content={"error": "File not found"})
+    try:
+        return waveform_data.slice_(ensure_accessible(req.audio_path), WAVEFORM_CACHE_DIR,
+                                    req.start, req.end, req.bins, req.peak)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"waveform slice failed: {e}"})
+
+
+# ── Beat detection (for beat markers) ──
+
+class BeatsRequest(BaseModel):
+    audio_path: str
+    bpm: Optional[float] = None        # fixed tempo; None = estimate (may drift)
+    min_bpm: float = 60.0
+    max_bpm: float = 200.0
+    tightness: float = 100.0           # higher = steadier grid, lower = follows onsets
+
+
+def _run_beats_worker(job, req):
+    try:
+        report = _job_progress(job)
+        report(0.02, "Preparing audio…")
+        src, _sr = waveform_data.pcm_source(ensure_accessible(req.audio_path), WAVEFORM_CACHE_DIR)
+        result = beat_tracker.detect(
+            src, min_bpm=req.min_bpm, max_bpm=req.max_bpm, bpm=req.bpm,
+            tightness=req.tightness, progress=lambda p, d: report(p, d))
+        job.update({"status": "done", "progress": 1.0, "stage": "done",
+                    "detail": f"{len(result['beats'])} beats · {result['bpm']} BPM",
+                    "result": result})
+    except JobCancelled:
+        job.update({"status": "error", "stage": "error", "detail": "Cancelled"})
+    except Exception as e:
+        job.update({"status": "error", "stage": "error", "detail": f"Beat detection failed: {e}"})
+
+
+@app.post("/beats")
+def detect_beats(req: BeatsRequest):
+    if not os.path.isfile(req.audio_path):
+        return JSONResponse(status_code=400, content={"error": "File not found"})
+    if req.bpm is not None and not (20 <= req.bpm <= 400):
+        return JSONResponse(status_code=400, content={"error": "BPM must be between 20 and 400"})
+    job = _new_job("beats")
+    threading.Thread(target=_run_beats_worker, args=(job, req), daemon=True).start()
+    return {"job_id": job["id"]}
+
+
+# ── Cut via XML (rebuild the sequence instead of editing it N times) ──
+
+class XmlCutRequest(BaseModel):
+    xml_path: str                      # FCP XML exported by Premiere (host.jsx)
+    cuts_ticks: list                   # [[start_ticks, end_ticks], ...] sequence time
+    name_suffix: str = " (EasyScript cut)"
+
+
+@app.post("/xml/cut")
+def xml_cut_sequence(req: XmlCutRequest):
+    src = req.xml_path
+    if not os.path.isfile(src) or not src.lower().endswith(".xml"):
+        return JSONResponse(status_code=400, content={"error": "Exported sequence XML not found"})
+    try:
+        cuts = [[int(a), int(b)] for a, b in req.cuts_ticks]
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400, content={"error": "cuts_ticks must be [[start, end], ...]"})
+    stamp = _time_module.strftime("%Y%m%d-%H%M%S")
+    try:
+        import xml.etree.ElementTree as _ET
+        seq_name = (_ET.parse(src).getroot().findtext(".//sequence/name") or "Sequence")
+    except Exception:
+        seq_name = "Sequence"
+    dst = os.path.join(export_dir, f"{xml_cut.safe_filename(seq_name)} - EasyScript cut {stamp}.xml")
+    try:
+        result = xml_cut.cut_sequence_xml(src, dst, cuts, name_suffix=req.name_suffix)
+    except xml_cut.XmlCutError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"XML cut failed: {e}"})
+    return result
 
 
 # ── Auto Cut (async — silence detection + peaks in background thread) ──
@@ -706,19 +912,31 @@ def save_settings(data):
     with open(SETTINGS_PATH, "w") as f:
         json.dump(data, f, indent=2)
 
+SECRET_SETTINGS = ("hf_token", "anthropic_api_key")
+
+
+def _mask_secret(value):
+    return value[:4] + "..." + value[-4:] if value else value
+
+
 @app.get("/settings")
 def get_settings():
     settings = load_settings()
     # Mask sensitive values
     masked = {**settings}
-    for key in ("hf_token", "anthropic_api_key"):
+    for key in SECRET_SETTINGS:
         if key in masked and masked[key]:
-            masked[key] = masked[key][:4] + "..." + masked[key][-4:]
+            masked[key] = _mask_secret(masked[key])
     return masked
 
 @app.post("/settings")
 def update_settings(data: dict):
     settings = load_settings()
+    for key in SECRET_SETTINGS:
+        # The panel shows the masked value from GET /settings; saving the form
+        # unchanged must not overwrite the real secret with its mask.
+        if key in data and settings.get(key) and data[key] == _mask_secret(settings[key]):
+            data = {k: v for k, v in data.items() if k != key}
     settings.update(data)
     save_settings(settings)
     return {"status": "ok"}
@@ -1277,6 +1495,24 @@ def get_export_dir():
     return {"path": export_dir}
 
 
+class ExportDirRequest(BaseModel):
+    path: str
+
+
+@app.post("/export-dir")
+def set_export_dir(req: ExportDirRequest):
+    """Set the export directory (the panel picks it with CEP's native dialog)."""
+    global export_dir
+    chosen = os.path.abspath(os.path.expanduser(req.path or ""))
+    if not os.path.isdir(chosen):
+        return JSONResponse(status_code=400, content={"error": f"Folder not found: {req.path}"})
+    export_dir = chosen
+    settings = load_settings()
+    settings["export_dir"] = export_dir
+    save_settings(settings)
+    return {"path": export_dir}
+
+
 @app.post("/choose-folder")
 def choose_folder():
     """Open native folder picker dialog. Returns selected path."""
@@ -1286,12 +1522,14 @@ def choose_folder():
     chosen = None
 
     if platform.system() == "Darwin":
-        # macOS: use osascript (works from any thread)
+        # macOS: use osascript (works from any thread). The path is embedded in
+        # an AppleScript string literal, so escape it.
+        default_loc = export_dir.replace("\\", "\\\\").replace('"', '\\"')
         try:
             result = subprocess.run(
                 ["osascript", "-e",
                  'set theFolder to choose folder with prompt "Choose export folder" '
-                 f'default location POSIX file "{export_dir}"\n'
+                 f'default location POSIX file "{default_loc}"\n'
                  'return POSIX path of theFolder'],
                 capture_output=True, text=True, timeout=60,
             )
@@ -1356,1401 +1594,13 @@ def get_analyze_progress():
     return autocut_progress
 
 
-@app.post("/find-file")
-def find_file(req: dict):
-    """Find a media file on disk by filename. Uses macOS Spotlight (mdfind) for speed."""
-    filename = req.get("filename", "").strip()
-    if not filename:
-        return {"error": "No filename provided", "path": ""}
-
-    import platform
-    found_path = ""
-
-    # Method 1: macOS Spotlight search (instant)
-    if platform.system() == "Darwin":
-        try:
-            result = subprocess.run(
-                ["mdfind", "-name", filename],
-                capture_output=True, text=True, timeout=5
-            )
-            paths = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
-            # Filter: exact filename match only (not .pek, .cfa, etc.)
-            for p in paths:
-                if os.path.isfile(p) and os.path.basename(p) == filename:
-                    found_path = p
-                    break
-        except Exception as e:
-            print(f"[find-file] mdfind error: {e}")
-
-    # Method 2: Search common media directories
-    if not found_path:
-        search_dirs = [
-            os.path.expanduser("~/Documents"),
-            os.path.expanduser("~/Desktop"),
-            os.path.expanduser("~/Downloads"),
-            os.path.expanduser("~/Movies"),
-            os.path.expanduser("~/Music"),
-            "/Volumes",
-        ]
-        for search_dir in search_dirs:
-            if not os.path.isdir(search_dir):
-                continue
-            try:
-                result = subprocess.run(
-                    ["find", search_dir, "-name", filename, "-type", "f", "-maxdepth", "6"],
-                    capture_output=True, text=True, timeout=10
-                )
-                paths = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
-                if paths:
-                    found_path = paths[0]
-                    break
-            except Exception:
-                continue
-
-    return {"path": found_path, "filename": filename}
-
-
-@app.post("/resolve-nested")
-def resolve_nested():
-    """Resolve media paths from a nested sequence via CEP ExtendScript.
-    Finds the nested sequence in the active timeline and returns the source media paths
-    from inside it.
-    """
-    import time as _time
-    import uuid
-
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    cmd_file = os.path.join(app_dir, "jsx_command.json")
-    result_file = os.path.join(app_dir, "jsx_result.json")
-
-    jsx_code = (
-        '(function(){'
-        'var seq=app.project.activeSequence;'
-        'if(!seq)return "ERROR:no seq";'
-        'var paths=[];'
-        # Check all video+audio track clips to find nested sequences
-        'var numSeq=app.project.sequences.numSequences;'
-        'function findNested(trk){'
-        'for(var c=0;c<trk.clips.numItems;c++){'
-        'var pi=trk.clips[c].projectItem;'
-        'if(!pi)continue;'
-        # Check if this projectItem is a sequence by comparing nodeId with all sequences
-        'for(var s=0;s<numSeq;s++){'
-        'var ss=app.project.sequences[s];'
-        'if(ss.projectItem&&ss.projectItem.nodeId===pi.nodeId){'
-        # Found nested sequence — get all audio media paths from it
-        'for(var at=0;at<ss.audioTracks.numTracks;at++){'
-        'for(var ac=0;ac<ss.audioTracks[at].clips.numItems;ac++){'
-        'try{var mp=ss.audioTracks[at].clips[ac].projectItem.getMediaPath();'
-        'if(mp)paths.push(mp);}catch(e){}'
-        '}'
-        '}'
-        # Also try video tracks for media with audio
-        'for(var vt=0;vt<ss.videoTracks.numTracks;vt++){'
-        'for(var vc=0;vc<ss.videoTracks[vt].clips.numItems;vc++){'
-        'try{var mp2=ss.videoTracks[vt].clips[vc].projectItem.getMediaPath();'
-        'if(mp2)paths.push(mp2);}catch(e){}'
-        '}'
-        '}'
-        'break;'
-        '}'
-        '}'
-        '}'
-        '}'
-        'for(var t=0;t<seq.videoTracks.numTracks;t++)findNested(seq.videoTracks[t]);'
-        'if(paths.length===0){'
-        'for(var t=0;t<seq.audioTracks.numTracks;t++)findNested(seq.audioTracks[t]);'
-        '}'
-        # Deduplicate
-        'var unique=[];'
-        'for(var i=0;i<paths.length;i++){'
-        'var dup=false;for(var j=0;j<unique.length;j++){if(unique[j]===paths[i])dup=true;}'
-        'if(!dup)unique.push(paths[i]);'
-        '}'
-        'if(unique.length===0)return "ERROR:no media paths in nested sequence";'
-        'return "PATHS|"+unique.join("|");'
-        '})();'
-    )
-
-    cid = str(uuid.uuid4())[:8]
-    command = {"id": cid, "action": "eval", "code": jsx_code, "timestamp": _time.time()}
-    with open(cmd_file, "w") as f:
-        json.dump(command, f)
-    try:
-        os.remove(result_file)
-    except FileNotFoundError:
-        pass
-
-    # Wait for result
-    for _ in range(20):
-        _time.sleep(0.3)
-        if os.path.exists(result_file):
-            try:
-                with open(result_file, "r", encoding="utf-8", errors="replace") as rf:
-                    rd = json.load(rf)
-                if rd.get("id") == cid:
-                    result = rd.get("result", "")
-                    if result.startswith("PATHS|"):
-                        paths = result.split("|")[1:]
-                        # Return first audio-like file, or first file
-                        audio_exts = {".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg"}
-                        video_exts = {".mp4", ".mov", ".mkv", ".avi", ".mxf"}
-                        audio_path = ""
-                        video_path = ""
-                        for p in paths:
-                            ext = os.path.splitext(p)[1].lower()
-                            if ext in audio_exts and not audio_path:
-                                audio_path = p
-                            elif ext in video_exts and not video_path:
-                                video_path = p
-                        # Prefer dedicated audio file, otherwise use video file (has audio track)
-                        chosen = audio_path or video_path or paths[0]
-                        return {"status": "ok", "path": chosen, "all_paths": paths}
-                    elif result.startswith("ERROR"):
-                        return {"status": "error", "message": result}
-                    else:
-                        return {"status": "error", "message": f"Unexpected: {result}"}
-            except Exception:
-                pass
-
-    return {"status": "error", "message": "CEP companion timeout"}
-
-
-class SpeakerCutsRequest(BaseModel):
-    speaker_changes: list  # List of {"time": float, "from_speaker": str, "to_speaker": str}
-    speaker_colors: dict   # { "SPEAKER_00": 0, "SPEAKER_01": 1, ... } — label color index
-    fps: float = 25.0
-
-
-@app.post("/apply-speaker-labels")
-def apply_speaker_labels(req: SpeakerCutsRequest):
-    """Apply speaker-based cuts and color labels to the timeline via CEP.
-
-    1. Adds razor cuts at speaker change boundaries
-    2. Labels each clip segment with the speaker's assigned color
-    """
-    import time as _time
-    import uuid
-
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    cmd_file = os.path.join(app_dir, "jsx_command.json")
-    result_file = os.path.join(app_dir, "jsx_result.json")
-
-    def _send_cep(code, timeout=30):
-        cid = str(uuid.uuid4())[:8]
-        command = {"id": cid, "action": "eval", "code": code, "timestamp": _time.time()}
-        with open(cmd_file, "w") as f:
-            json.dump(command, f)
-        try:
-            os.remove(result_file)
-        except FileNotFoundError:
-            pass
-        elapsed = 0
-        while elapsed < timeout:
-            _time.sleep(0.3)
-            elapsed += 0.3
-            if os.path.exists(result_file):
-                try:
-                    with open(result_file, "r", encoding="utf-8", errors="replace") as rf:
-                        rd = json.load(rf)
-                    if rd.get("id") == cid:
-                        return rd.get("result", "")
-                except:
-                    pass
-        return None
-
-    speaker_changes = req.speaker_changes
-    speaker_colors = req.speaker_colors
-    fps = req.fps
-
-    # Premiere label colors: 0=Violet, 1=Iris, 2=Caribbean, 3=Lavender,
-    # 4=Cerulean, 5=Forest, 6=Rose, 7=Mango, 8=Purple, 9=Blue, 10=Teal,
-    # 11=Magenta, 12=Tan, 13=Green, 14=Brown, 15=Yellow
-    # We use distinct colors for speakers
-    SPEAKER_LABEL_COLORS = [4, 6, 5, 7, 9, 14, 15, 8]  # Cerulean, Rose, Forest, Mango, Blue, Brown, Yellow, Purple
-
-    # Build speaker→label color mapping
-    color_map = {}
-    for spk, idx in speaker_colors.items():
-        color_map[spk] = SPEAKER_LABEL_COLORS[idx % len(SPEAKER_LABEL_COLORS)]
-
-    changes_js = json.dumps(speaker_changes)
-    color_map_js = json.dumps(color_map)
-
-    # Step 1: Split at speaker change points using 1-frame extract
-    # (extract removes 1 frame but effectively splits the clip at that point)
-    jsx_split = (
-        '(function(){'
-        'var TICKS=254016000000;'
-        'var fps=' + str(fps) + ';'
-        'var changes=' + changes_js + ';'
-        'var log=[];'
-        'try{app.enableQE();}catch(e){return "ERROR:QE:"+e.message;}'
-        'var qeSeq;try{qeSeq=qe.project.getActiveSequence();}catch(e){return "ERROR:"+e.message;}'
-        'var seq=app.project.activeSequence;'
-        'if(!seq)return "ERROR:No seq";'
-        'var nV=seq.videoTracks.numTracks;var nA=seq.audioTracks.numTracks;'
-        # Target all tracks
-        'for(var t=0;t<nV;t++){try{seq.videoTracks[t].setTargeted(true,true);}catch(e){try{seq.videoTracks[t].setTargeted(true);}catch(e2){}}}'
-        'for(var t=0;t<nA;t++){try{seq.audioTracks[t].setTargeted(true,true);}catch(e){try{seq.audioTracks[t].setTargeted(true);}catch(e2){}}}'
-        # Sort change points descending (process end→start)
-        'changes.sort(function(a,b){return b.time-a.time;});'
-        'var ok=0;var skip=0;var frameDur=1.0/fps;'
-        'for(var i=0;i<changes.length;i++){'
-        'var t=Math.round(changes[i].time*fps)/fps;'  # snap to frame
-        'var inTicks=Math.round(t*TICKS).toString();'
-        'var outTicks=Math.round((t+frameDur)*TICKS).toString();'
-        'try{'
-        'seq.setInPoint(inTicks);'
-        'seq.setOutPoint(outTicks);'
-        'qeSeq.extract();ok++;'
-        '}catch(ex){skip++;}'
-        '}'
-        'try{seq.setInPoint("0");}catch(ex){}'
-        'log.push("splits:"+ok+" skip:"+skip);'
-        'return "OK|"+ok+"|"+log.join("\\n");'
-        '})();'
-    )
-
-    split_result = _send_cep(jsx_split, timeout=30)
-    split_info = split_result or "timeout"
-
-    # Step 2: Label clips by speaker color
-    # Build a segment map: for each speech segment, we know the speaker.
-    # We'll label clips based on their position matching speech segments.
-    # Labeling is now done via UXP API in the plugin (more reliable than ExtendScript)
-
-    return {
-        "status": "ok",
-        "split_result": split_info,
-    }
-
-
-# ── ExtendScript execution for Premiere Pro ──
-# Since UXP API doesn't support razor/add-edit operations,
-# we use osascript to send ExtendScript to the running Premiere Pro instance.
-
-class JsxRequest(BaseModel):
-    code: str
-
-@app.post("/execute-jsx")
-def execute_jsx(req: JsxRequest):
-    """Execute ExtendScript code in the running Premiere Pro instance via osascript."""
-    jsx_code = req.code
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    jsx_path = os.path.join(app_dir, "apply_cuts.jsx")
-
-    # Write the jsx file
-    with open(jsx_path, "w", encoding="utf-8") as f:
-        f.write(jsx_code)
-
-    errors = []
-
-    # Find the running Premiere Pro app name
-    # Try to detect from running processes
-    premiere_app = None
-    try:
-        ps_result = subprocess.run(
-            ["osascript", "-e", 'tell application "System Events" to get name of every process whose name contains "Premiere"'],
-            capture_output=True, text=True, timeout=5
-        )
-        if ps_result.returncode == 0 and ps_result.stdout.strip():
-            premiere_app = ps_result.stdout.strip().split(",")[0].strip()
-    except Exception as e:
-        errors.append(f"detect app: {str(e)}")
-
-    # Fallback app names to try
-    app_names = []
-    if premiere_app:
-        app_names.append(premiere_app)
-    app_names.extend([
-        "Adobe Premiere Pro 2025",
-        "Adobe Premiere Pro 2024",
-        "Adobe Premiere Pro 2023",
-        "Adobe Premiere Pro",
-    ])
-    # Remove duplicates while preserving order
-    seen = set()
-    app_names = [x for x in app_names if not (x in seen or seen.add(x))]
-
-    # Method 1: osascript "do javascript" with evalFile
-    for app_name in app_names:
-        try:
-            # Escape path for AppleScript
-            escaped_path = jsx_path.replace("\\", "\\\\").replace('"', '\\"')
-            apple_script = f'tell application "{app_name}" to do javascript "$.evalFile(\'{escaped_path}\')"'
-            result = subprocess.run(
-                ["osascript", "-e", apple_script],
-                capture_output=True, text=True, timeout=60
-            )
-            if result.returncode == 0:
-                return {"status": "ok", "method": f"do javascript ({app_name})", "output": result.stdout.strip()}
-            errors.append(f"do javascript [{app_name}]: {result.stderr.strip()}")
-        except subprocess.TimeoutExpired:
-            errors.append(f"do javascript [{app_name}]: timeout")
-        except Exception as e:
-            errors.append(f"do javascript [{app_name}]: {str(e)}")
-
-    # Method 2: osascript "do script"
-    for app_name in app_names:
-        try:
-            apple_script = f'tell application "{app_name}" to do script "{jsx_path}"'
-            result = subprocess.run(
-                ["osascript", "-e", apple_script],
-                capture_output=True, text=True, timeout=60
-            )
-            if result.returncode == 0:
-                return {"status": "ok", "method": f"do script ({app_name})", "output": result.stdout.strip()}
-            errors.append(f"do script [{app_name}]: {result.stderr.strip()}")
-        except subprocess.TimeoutExpired:
-            errors.append(f"do script [{app_name}]: timeout")
-        except Exception as e:
-            errors.append(f"do script [{app_name}]: {str(e)}")
-
-    # Method 3: Use open command to open .jsx with Premiere
-    for app_name in app_names:
-        try:
-            result = subprocess.run(
-                ["open", "-a", app_name, jsx_path],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 0:
-                # open returns immediately, wait a bit
-                import time
-                time.sleep(3)
-                return {"status": "ok", "method": f"open -a ({app_name})", "output": "Script opened (async)"}
-            errors.append(f"open -a [{app_name}]: {result.stderr.strip()}")
-        except Exception as e:
-            errors.append(f"open -a [{app_name}]: {str(e)}")
-
-    return {"status": "error", "errors": errors, "jsx_path": jsx_path}
-
-
-class SplitAtPointsRequest(BaseModel):
-    points: list  # [float] — post-cut timeline positions in seconds to add edits at
-    fps: float = 25.0
-
-
-@app.post("/split-at-points")
-def split_at_points(req: SplitAtPointsRequest):
-    """Non-destructive split (Add Edit) at given timeline positions.
-
-    Uses keyboard shortcut Cmd+Shift+D via osascript since QE DOM razor()
-    silently fails in Premiere 2025/2026. This:
-    1. Sets playhead position via CEP ExtendScript
-    2. Sends Cmd+Shift+D (Add Edit to All Tracks) via System Events
-    No content is removed — just splits clips at each point.
-    """
-    import time as _time
-    import uuid
-
-    if not req.points:
-        return {"status": "ok", "splits": 0, "message": "No split points"}
-
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    cmd_file = os.path.join(app_dir, "jsx_command.json")
-    result_file = os.path.join(app_dir, "jsx_result.json")
-
-    TICKS = 254016000000
-    fps = req.fps
-    points = sorted(req.points)
-
-    def snap(sec):
-        return round(sec * fps) / fps
-
-    # Find Premiere Pro process name
-    premiere_app = "Adobe Premiere Pro"
-    try:
-        ps_result = subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to get name of every process whose name contains "Premiere"'],
-            capture_output=True, text=True, timeout=5
-        )
-        if ps_result.returncode == 0 and ps_result.stdout.strip():
-            premiere_app = ps_result.stdout.strip().split(",")[0].strip()
-    except Exception:
-        pass
-
-    def send_cep_command(cmd_id, jsx_code, timeout=10):
-        command = {"id": cmd_id, "action": "eval", "code": jsx_code, "timestamp": _time.time()}
-        with open(cmd_file, "w") as f:
-            json.dump(command, f)
-        try:
-            os.remove(result_file)
-        except FileNotFoundError:
-            pass
-        for _ in range(int(timeout / 0.3)):
-            _time.sleep(0.3)
-            if os.path.exists(result_file):
-                try:
-                    with open(result_file, "r", encoding="utf-8", errors="replace") as f:
-                        result_data = json.load(f)
-                    if result_data.get("id") == cmd_id:
-                        return result_data.get("result", "")
-                except Exception:
-                    pass
-        return None
-
-    log = [f"Split points: {len(points)}", f"fps: {fps}"]
-
-    # Count clips before
-    count_jsx = (
-        '(function(){'
-        'var seq=app.project.activeSequence;if(!seq)return "ERROR:no seq";'
-        'var n=0;'
-        'for(var t=0;t<seq.videoTracks.numTracks;t++)n+=seq.videoTracks[t].clips.numItems;'
-        'for(var t=0;t<seq.audioTracks.numTracks;t++)n+=seq.audioTracks[t].clips.numItems;'
-        'return "CLIPS:"+n;'
-        '})();'
-    )
-    count_result = send_cep_command("scnt-" + str(uuid.uuid4())[:4], count_jsx)
-    if not count_result:
-        return {"status": "error", "message": "CEP companion not responding"}
-
-    clips_before = 0
-    if count_result.startswith("CLIPS:"):
-        clips_before = int(count_result.split(":")[1])
-    log.append(f"Clips before: {clips_before}")
-
-    # Set playhead + Cmd+Shift+D for each split point
-    edit_count = 0
-    for i, pt in enumerate(points):
-        snapped = snap(pt)
-        ticks = str(int(round(snapped * TICKS)))
-
-        # Set playhead via CEP
-        set_pos_jsx = f'(function(){{var seq=app.project.activeSequence;if(!seq)return "ERR";seq.setPlayerPosition("{ticks}");return "OK";}})();'
-        pos_result = send_cep_command(f"sp-{i}", set_pos_jsx, timeout=5)
-        if pos_result != "OK":
-            log.append(f"Split {i}: setPlayerPosition failed: {pos_result}")
-            continue
-
-        _time.sleep(0.05)
-
-        # Send Cmd+Shift+D = "Add Edit to All Tracks"
-        script = f'''
-        tell application "System Events"
-            tell process "{premiere_app}"
-                set frontmost to true
-                keystroke "d" using {{command down, shift down}}
-            end tell
-        end tell
-        '''
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                edit_count += 1
-            else:
-                log.append(f"Split {i}: keystroke failed: {result.stderr}")
-        except Exception as e:
-            log.append(f"Split {i}: osascript error: {e}")
-
-        _time.sleep(0.1)
-
-    log.append(f"Edit commands sent: {edit_count}")
-
-    # Wait for Premiere to process
-    _time.sleep(0.5)
-
-    # Count clips after
-    count_result2 = send_cep_command("scnt2-" + str(uuid.uuid4())[:4], count_jsx)
-    clips_after = 0
-    if count_result2 and count_result2.startswith("CLIPS:"):
-        clips_after = int(count_result2.split(":")[1])
-    log.append(f"Clips after: {clips_after}")
-    log.append(f"New clips: {clips_after - clips_before}")
-
-    return {
-        "status": "ok",
-        "splits": clips_after - clips_before,
-        "edit_count": edit_count,
-        "clips_before": clips_before,
-        "clips_after": clips_after,
-        "log": "\n".join(log),
-    }
-
-
-class DiagRequest(BaseModel):
-    test_time: float = 5.0  # Time in seconds to test razor
-
-@app.post("/test-razor")
-def test_razor():
-    """Test ALL possible ways to razor/split a clip at a specific time without removing content."""
-    import time as _time
-    import uuid
-
-    jsx_code = (
-        '(function(){'
-        'var TICKS=254016000000;'
-        'var seq=app.project.activeSequence;if(!seq)return "ERROR:no seq";'
-        'try{app.enableQE();}catch(e){return "ERROR:QE:"+e.message;}'
-        'var qeSeq;try{qeSeq=qe.project.getActiveSequence();}catch(e){return "ERROR:qeSeq:"+e.message;}'
-        'var log=[];'
-        'var nV=seq.videoTracks.numTracks;var nA=seq.audioTracks.numTracks;'
-
-        # Count clips before
-        'var before=0;'
-        'for(var t=0;t<nV;t++)before+=seq.videoTracks[t].clips.numItems;'
-        'for(var t=0;t<nA;t++)before+=seq.audioTracks[t].clips.numItems;'
-        'log.push("before:"+before);'
-
-        # Get a split point in the middle of the first video clip
-        'var c0=seq.videoTracks[0].clips[0];'
-        'if(!c0)return "ERROR:no clips";'
-        'var midSec=(c0.start.seconds+c0.end.seconds)/2;'
-        'var midTicks=Math.round(midSec*TICKS);'
-        'log.push("splitAt:"+midSec.toFixed(3)+"s ticks:"+midTicks);'
-
-        # Get fps for timecode
-        'var fps=25;try{var tb=seq.timebase;if(tb)fps=parseFloat(tb);}catch(e){}'
-        'var frame=Math.floor(midSec*fps);'
-        'var ff=frame%Math.round(fps);'
-        'var ss=Math.floor(midSec)%60;'
-        'var mm=Math.floor(midSec/60)%60;'
-        'var hh=Math.floor(midSec/3600);'
-        'var tc=(hh<10?"0":"")+hh+":"+(mm<10?"0":"")+mm+":"+(ss<10?"0":"")+ss+":"+(ff<10?"0":"")+ff;'
-        'log.push("timecode:"+tc+" fps:"+fps);'
-
-        # Enumerate qeTrack methods
-        'var qeVT=qeSeq.getVideoTrackAt(0);'
-        'var vtKeys=[];for(var k in qeVT)vtKeys.push(k+":"+typeof qeVT[k]);'
-        'log.push("qeTrackKeys:"+vtKeys.join(","));'
-
-        # Test 1: qeTrack.razor(ticksString)
-        'try{qeVT.razor(midTicks.toString());log.push("razor(tickStr):ok");}catch(e){log.push("razor(tickStr):"+e.message);}'
-
-        # Test 2: qeTrack.razor(timecode)
-        'try{qeVT.razor(tc);log.push("razor(tc):ok");}catch(e){log.push("razor(tc):"+e.message);}'
-
-        # Test 3: qeTrack.razor(seconds as string)
-        'try{qeVT.razor(midSec.toString());log.push("razor(secStr):ok");}catch(e){log.push("razor(secStr):"+e.message);}'
-
-        # Test 4: qeTrack.razor(ticks as number)
-        'try{qeVT.razor(midTicks);log.push("razor(tickNum):ok");}catch(e){log.push("razor(tickNum):"+e.message);}'
-
-        # Test 5: qeTrack.razorAt? splitAt?
-        'try{if(typeof qeVT.razorAt==="function"){qeVT.razorAt(midTicks.toString());log.push("razorAt:ok");}else{log.push("razorAt:N/A");}}catch(e){log.push("razorAt:"+e.message);}'
-        'try{if(typeof qeVT.splitAt==="function"){qeVT.splitAt(midTicks.toString());log.push("splitAt:ok");}else{log.push("splitAt:N/A");}}catch(e){log.push("splitAt:"+e.message);}'
-
-        # Test 6: try on audio track too
-        'var qeAT=qeSeq.getAudioTrackAt(0);'
-        'try{qeAT.razor(midTicks.toString());log.push("audioRazor(tickStr):ok");}catch(e){log.push("audioRazor:"+e.message);}'
-
-        # Test 7: sequence-level addEdit
-        'try{if(typeof qeSeq.addEdit==="function"){qeSeq.addEdit(midTicks.toString());log.push("qeSeq.addEdit:ok");}else{log.push("qeSeq.addEdit:N/A");}}catch(e){log.push("qeSeq.addEdit:"+e.message);}'
-
-        # Test 8: razor on all targeted tracks via sequence
-        'try{if(typeof qeSeq.razor==="function"){qeSeq.razor(midTicks.toString());log.push("qeSeq.razor:ok");}else{log.push("qeSeq.razor:N/A");}}catch(e){log.push("qeSeq.razor:"+e.message);}'
-
-        # Count clips after
-        'var after=0;'
-        'for(var t=0;t<nV;t++)after+=seq.videoTracks[t].clips.numItems;'
-        'for(var t=0;t<nA;t++)after+=seq.audioTracks[t].clips.numItems;'
-        'log.push("after:"+after+" diff:"+(after-before));'
-
-        'return "RAZOR|"+log.join("\\n");'
-        '})();'
-    )
-
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    cmd_file = os.path.join(app_dir, "jsx_command.json")
-    result_file = os.path.join(app_dir, "jsx_result.json")
-
-    cid = str(uuid.uuid4())[:8]
-    command = {"id": cid, "action": "eval", "code": jsx_code, "timestamp": _time.time()}
-    with open(cmd_file, "w") as f:
-        json.dump(command, f)
-    try:
-        os.remove(result_file)
-    except FileNotFoundError:
-        pass
-
-    for _ in range(30):
-        _time.sleep(0.5)
-        if os.path.exists(result_file):
-            try:
-                with open(result_file, "r", encoding="utf-8", errors="replace") as rf:
-                    rd = json.load(rf)
-                if rd.get("id") == cid:
-                    return {"status": "ok", "result": rd.get("result", "")}
-            except:
-                pass
-
-    return {"status": "error", "message": "CEP timeout"}
-
-
-class LabelClipsRequest(BaseModel):
-    speaker_ranges: list   # [{ s: float, e: float, spk: str }, ...]
-    color_map: dict        # { "SPEAKER_00": 4, "SPEAKER_01": 6, ... }
-    speaker_names: dict = {}  # { "SPEAKER_00": "Speaker A", ... }
-
-
-@app.post("/label-clips-jsx")
-def label_clips_jsx(req: LabelClipsRequest):
-    """Rename clips by speaker name AND try to set label via JSX.
-
-    Since per-clip label colors don't have a public API in Premiere ExtendScript,
-    we rename clips to show the speaker name on the timeline.
-    Also try projectItem.setColorLabel as a best-effort color attempt.
-    """
-    import time as _time
-    import uuid
-
-    ranges_js = json.dumps(req.speaker_ranges)
-    names_js = json.dumps(req.speaker_names)
-
-    jsx_code = (
-        '(function(){'
-        'var seq=app.project.activeSequence;if(!seq)return "ERROR:no seq";'
-        'var ranges=' + ranges_js + ';'
-        'var names=' + names_js + ';'
-        'var nV=seq.videoTracks.numTracks;var nA=seq.audioTracks.numTracks;'
-
-        # Helper: find speaker for a given time (midpoint of clip)
-        'function getSpeaker(sec){'
-        'for(var i=0;i<ranges.length;i++){'
-        'if(sec>=ranges[i].s-0.15&&sec<ranges[i].e+0.15)return ranges[i].spk;'
-        '}'
-        'return "";'
-        '}'
-
-        # Helper: format seconds to MM:SS
-        'function fmtTime(s){var m=Math.floor(s/60);var ss=Math.floor(s%60);'
-        'return(m<10?"0":"")+m+":"+(ss<10?"0":"")+ss;}'
-
-        # Rename clips by speaker
-        'var renamed=0;'
-        'for(var t=0;t<nV;t++){'
-        'for(var c=0;c<seq.videoTracks[t].clips.numItems;c++){'
-        'var cl=seq.videoTracks[t].clips[c];'
-        'var mid=(cl.start.seconds+cl.end.seconds)/2;'
-        'var spk=getSpeaker(mid);'
-        'if(spk&&names[spk]){'
-        'try{cl.name=names[spk]+" · "+fmtTime(cl.start.seconds);renamed++;}catch(e){}'
-        '}'
-        '}}'
-        'for(var t=0;t<nA;t++){'
-        'for(var c=0;c<seq.audioTracks[t].clips.numItems;c++){'
-        'var cl=seq.audioTracks[t].clips[c];'
-        'var mid=(cl.start.seconds+cl.end.seconds)/2;'
-        'var spk=getSpeaker(mid);'
-        'if(spk&&names[spk]){'
-        'try{cl.name=names[spk]+" · "+fmtTime(cl.start.seconds);renamed++;}catch(e){}'
-        '}'
-        '}}'
-
-        'return "COLORED|"+renamed+"|clip.name|renamed:"+renamed;'
-        '})();'
-    )
-
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    cmd_file = os.path.join(app_dir, "jsx_command.json")
-    result_file = os.path.join(app_dir, "jsx_result.json")
-
-    cid = str(uuid.uuid4())[:8]
-    command = {"id": cid, "action": "eval", "code": jsx_code, "timestamp": _time.time()}
-    with open(cmd_file, "w") as f:
-        json.dump(command, f)
-    try:
-        os.remove(result_file)
-    except FileNotFoundError:
-        pass
-
-    for _ in range(30):
-        _time.sleep(0.5)
-        if os.path.exists(result_file):
-            try:
-                with open(result_file, "r", encoding="utf-8", errors="replace") as rf:
-                    rd = json.load(rf)
-                if rd.get("id") == cid:
-                    return {"status": "ok", "result": rd.get("result", "")}
-            except:
-                pass
-
-    return {"status": "error", "message": "CEP timeout"}
-
-
-@app.post("/diag-jsx")
-def diag_jsx(req: DiagRequest):
-    """Run diagnostic ExtendScript to discover what APIs actually work for splitting clips."""
-    import time as _time
-    import uuid
-
-    test_time = req.test_time
-
-    # Simplified diagnostic that tests extract and enumerate qeSeq
-    # Single-line diagnostic for evalScript compatibility
-    jsx_code = (
-        '(function(){'
-        'var log=[];var TICKS=254016000000;var testSec=' + str(test_time) + ';'
-        'try{app.enableQE();log.push("QE:ok");}catch(e){return "ERROR:QE:"+e.message;}'
-        'var seq=app.project.activeSequence;if(!seq)return "ERROR:no sequence";'
-        'var qeSeq;try{qeSeq=qe.project.getActiveSequence();}catch(e){return "ERROR:qeSeq:"+e.message;}'
-        'log.push("seq:"+seq.name);log.push("ver:"+app.version);'
-        'var nV=seq.videoTracks.numTracks;var nA=seq.audioTracks.numTracks;'
-        'log.push("V:"+nV+" A:"+nA);'
-        # Count clips
-        'var totalClips=0;'
-        'for(var t=0;t<nV;t++)totalClips+=seq.videoTracks[t].clips.numItems;'
-        'for(var t=0;t<nA;t++)totalClips+=seq.audioTracks[t].clips.numItems;'
-        'log.push("Clips:"+totalClips);'
-        # Target all tracks
-        'for(var t=0;t<nV;t++){try{seq.videoTracks[t].setTargeted(true,true);}catch(e){}}'
-        'for(var t=0;t<nA;t++){try{seq.audioTracks[t].setTargeted(true,true);}catch(e){}}'
-        # Test extract with in/out points
-        'var inT=Math.round(testSec*TICKS).toString();'
-        'var outT=Math.round((testSec+1.0)*TICKS).toString();'
-        'try{seq.setInPoint(inT);log.push("setIn:ok");}catch(e){log.push("setIn:"+e.message);}'
-        'try{seq.setOutPoint(outT);log.push("setOut:ok");}catch(e){log.push("setOut:"+e.message);}'
-        'var clipsBefore=totalClips;'
-        'try{qeSeq.extract();log.push("extract:ok");}catch(e){log.push("extract:"+e.message);}'
-        'var clipsAfter=0;'
-        'for(var t=0;t<nV;t++)clipsAfter+=seq.videoTracks[t].clips.numItems;'
-        'for(var t=0;t<nA;t++)clipsAfter+=seq.audioTracks[t].clips.numItems;'
-        'log.push("ClipsAfter:"+clipsAfter);'
-        # Check clip.move() and undo APIs
-        'log.push("clip.move:"+(typeof seq.videoTracks[0].clips[0].move));'
-        'log.push("clip.start.ticks:"+seq.videoTracks[0].clips[0].start.ticks);'
-        # Check for undo group APIs
-        'log.push("beginUndoGroup:"+(typeof app.beginUndoGroup));'
-        'log.push("endUndoGroup:"+(typeof app.endUndoGroup));'
-        # Enumerate qeSeq keys
-        'var qeAll=[];try{for(var k in qeSeq)qeAll.push(k);}catch(e){}'
-        'log.push("qeSeq:"+qeAll.join(","));'
-        # Enumerate app keys for undo
-        'var appKeys=[];try{for(var k in app){if(k.indexOf("ndo")>=0||k.indexOf("roup")>=0)appKeys.push(k);}}catch(e){}'
-        'log.push("appUndo:"+appKeys.join(","));'
-        'try{seq.setInPoint("0");}catch(e){}'
-        'return "DIAG|"+log.join("\\n");'
-        '})();'
-    )
-
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    cmd_file = os.path.join(app_dir, "jsx_command.json")
-    result_file = os.path.join(app_dir, "jsx_result.json")
-
-    cmd_id = "diag-" + str(uuid.uuid4())[:4]
-    command = {"id": cmd_id, "action": "eval", "code": jsx_code, "timestamp": _time.time()}
-
-    with open(cmd_file, "w") as f:
-        json.dump(command, f)
-
-    try:
-        os.remove(result_file)
-    except FileNotFoundError:
-        pass
-
-    for _ in range(60):  # 30 second timeout
-        _time.sleep(0.5)
-        if os.path.exists(result_file):
-            try:
-                with open(result_file, "r", encoding="utf-8", errors="replace") as f:
-                    result_data = json.load(f)
-                if result_data.get("id") == cmd_id:
-                    return {"status": "ok", "result": result_data.get("result", "")}
-            except:
-                pass
-
-    return {"status": "error", "message": "CEP companion timeout"}
-
-
-@app.post("/diag-label")
-def diag_label():
-    """Diagnostic: enumerate ALL properties/methods on TrackItem and try setting label color."""
-    import time as _time
-    import uuid
-
-    jsx_code = (
-        '(function(){'
-        'var seq=app.project.activeSequence;if(!seq)return "ERROR:no seq";'
-        'var clip=seq.videoTracks[0].clips[0];if(!clip)return "ERROR:no clip";'
-        'var log=[];'
-
-        # Enumerate ALL keys on clip
-        'var allKeys=[];for(var k in clip){allKeys.push(k+":"+typeof clip[k]);}log.push("CLIP_KEYS:"+allKeys.join(","));'
-
-        # Enumerate projectItem keys
-        'try{var pi=clip.projectItem;var piKeys=[];for(var k in pi){piKeys.push(k+":"+typeof pi[k]);}log.push("PI_KEYS:"+piKeys.join(","));}catch(e){log.push("PI_ERR:"+e.message);}'
-
-        # Try QE clip keys
-        'try{app.enableQE();var qeSeq=qe.project.getActiveSequence();'
-        'var qeVT=qeSeq.getVideoTrackAt(0);var qeClip=qeVT.getItemAt(0);'
-        'var qeKeys=[];for(var k in qeClip){qeKeys.push(k+":"+typeof qeClip[k]);}log.push("QE_CLIP_KEYS:"+qeKeys.join(","));'
-        '}catch(e){log.push("QE_ERR:"+e.message);}'
-
-        # Try setting label via different methods
-        'var tests=[];'
-        'try{clip.setColorLabel(4);tests.push("setColorLabel:OK");}catch(e){tests.push("setColorLabel:"+e.message);}'
-        'try{clip.colorLabel=4;tests.push("colorLabel=4:OK");}catch(e){tests.push("colorLabel=:"+e.message);}'
-        'try{clip.label=4;tests.push("label=4:OK");}catch(e){tests.push("label=:"+e.message);}'
-        'try{clip.projectItem.setColorLabel(4);tests.push("pi.setColorLabel:OK");}catch(e){tests.push("pi.setColorLabel:"+e.message);}'
-        # QE methods
-        'try{var qeC=qeSeq.getVideoTrackAt(0).getItemAt(0);qeC.setColorLabel(4);tests.push("qe.setColorLabel:OK");}catch(e){tests.push("qe.setColorLabel:"+e.message);}'
-        'try{var qeC=qeSeq.getVideoTrackAt(0).getItemAt(0);qeC.SetLabel(4);tests.push("qe.SetLabel:OK");}catch(e){tests.push("qe.SetLabel:"+e.message);}'
-        'try{var qeC=qeSeq.getVideoTrackAt(0).getItemAt(0);qeC.setLabel(4);tests.push("qe.setLabel:OK");}catch(e){tests.push("qe.setLabel:"+e.message);}'
-
-        'log.push("TESTS:"+tests.join("|"));'
-        'return "DIAG|"+log.join("\\n");'
-        '})();'
-    )
-
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    cmd_file = os.path.join(app_dir, "jsx_command.json")
-    result_file = os.path.join(app_dir, "jsx_result.json")
-
-    cmd_id = "diag-label-" + str(uuid.uuid4())[:4]
-    command = {"id": cmd_id, "action": "eval", "code": jsx_code, "timestamp": _time.time()}
-    with open(cmd_file, "w") as f:
-        json.dump(command, f)
-    try:
-        os.remove(result_file)
-    except FileNotFoundError:
-        pass
-
-    for _ in range(20):
-        _time.sleep(0.5)
-        if os.path.exists(result_file):
-            try:
-                with open(result_file, "r", encoding="utf-8", errors="replace") as rf:
-                    rd = json.load(rf)
-                if rd.get("id") == cmd_id:
-                    return {"status": "ok", "result": rd.get("result", "")}
-            except:
-                pass
-
-    return {"status": "error", "message": "timeout"}
-
-
-class ApplyCutsRequest(BaseModel):
-    boundaries: list  # List of time positions (in seconds) to add edit
-    silence_regions: list  # List of [start, end] pairs to remove
-
-@app.post("/apply-cuts")
-def apply_cuts(req: ApplyCutsRequest):
-    """
-    Send cut data to the CEP companion extension via file-based IPC.
-    The CEP extension polls ~/.easyscript/jsx_command.json and executes ExtendScript.
-    Results are written to ~/.easyscript/jsx_result.json.
-    """
-    import time as _time
-    import uuid
-
-    boundaries = req.boundaries
-    silence_regions = req.silence_regions
-
-    if not boundaries:
-        return {"status": "error", "errors": ["No boundaries provided"]}
-
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    cmd_file = os.path.join(app_dir, "jsx_command.json")
-    result_file = os.path.join(app_dir, "jsx_result.json")
-
-    def _send_cep(code, timeout=30):
-        """Send code to CEP and wait for result."""
-        cid = str(uuid.uuid4())[:8]
-        command = {"id": cid, "action": "eval", "code": code, "timestamp": _time.time()}
-        with open(cmd_file, "w") as f:
-            json.dump(command, f)
-        try:
-            os.remove(result_file)
-        except FileNotFoundError:
-            pass
-        elapsed = 0
-        while elapsed < timeout:
-            _time.sleep(0.3)
-            elapsed += 0.3
-            if os.path.exists(result_file):
-                try:
-                    with open(result_file, "r", encoding="utf-8", errors="replace") as f:
-                        rd = json.load(f)
-                    if rd.get("id") == cid:
-                        return rd.get("result", "")
-                except:
-                    pass
-        return None
-
-    # ── Step 1: Extract silence regions ──
-    jsx_extract = _generate_apply_cuts_jsx(boundaries, silence_regions)
-    extract_result = _send_cep(jsx_extract, timeout=30)
-
-    if not extract_result:
-        return {
-            "status": "error",
-            "method": "timeout",
-            "errors": [
-                "CEP companion not responding. Make sure:",
-                "1. Open Window > Extensions > Pro Cut Helper",
-                "2. Panel shows 'Polling for commands...'",
-            ]
-        }
-
-    if extract_result.startswith("ERROR"):
-        return {"status": "error", "method": "CEP companion", "errors": [extract_result]}
-
-    # Parse extract result
-    extract_log = ""
-    extract_count = 0
-    if extract_result.startswith("OK|"):
-        parts = extract_result.split("|", 3)
-        extract_count = int(parts[1]) if len(parts) > 1 else 0
-        extract_log = parts[3] if len(parts) > 3 else ""
-
-    # ── Step 2: Close remaining gaps (safety net — extract should already ripple-delete) ──
-    # Parse gap count from extract result
-    gaps_remaining = 0
-    if extract_result and extract_result.startswith("OK|"):
-        parts = extract_result.split("|", 3)
-        gaps_remaining = int(parts[2]) if len(parts) > 2 else 0
-
-    gap_result = None
-    if gaps_remaining > 0:
-        jsx_gaps = (
-            '(function(){'
-            'var seq=app.project.activeSequence;'
-            'if(!seq)return "ERROR:no seq";'
-            'var nV=seq.videoTracks.numTracks;var nA=seq.audioTracks.numTracks;'
-            'var closed=0;var err=0;'
-            # Close gaps on video tracks — use parseFloat for numeric comparison
-            'for(var t=0;t<nV;t++){'
-            'var trk=seq.videoTracks[t];'
-            # Multiple passes — moving clips can reveal new gaps
-            'for(var pass=0;pass<3;pass++){'
-            'for(var c=1;c<trk.clips.numItems;c++){'
-            'try{'
-            'var pe=parseFloat(trk.clips[c-1].end.ticks);'
-            'var cs=parseFloat(trk.clips[c].start.ticks);'
-            'if(cs-pe>1000){trk.clips[c].move(pe.toString());closed++;}'
-            '}catch(e){err++;}'
-            '}'
-            '}'
-            '}'
-            # Close gaps on audio tracks
-            'for(var t=0;t<nA;t++){'
-            'var trk=seq.audioTracks[t];'
-            'for(var pass=0;pass<3;pass++){'
-            'for(var c=1;c<trk.clips.numItems;c++){'
-            'try{'
-            'var pe=parseFloat(trk.clips[c-1].end.ticks);'
-            'var cs=parseFloat(trk.clips[c].start.ticks);'
-            'if(cs-pe>1000){trk.clips[c].move(pe.toString());closed++;}'
-            '}catch(e){err++;}'
-            '}'
-            '}'
-            '}'
-            # Verify remaining gaps
-            'var still=0;'
-            'for(var t=0;t<nV;t++){'
-            'var trk=seq.videoTracks[t];'
-            'for(var c=1;c<trk.clips.numItems;c++){'
-            'var pe=parseFloat(trk.clips[c-1].end.ticks);'
-            'var cs=parseFloat(trk.clips[c].start.ticks);'
-            'if(cs-pe>1000)still++;'
-            '}'
-            '}'
-            'return "GAPS|"+closed+"|"+err+"|"+still;'
-            '})();'
-        )
-
-        gap_result = _send_cep(jsx_gaps, timeout=15)
-    gap_info = ""
-    if gap_result and gap_result.startswith("GAPS|"):
-        gparts = gap_result.split("|")
-        gap_info = f"GapsClosed:{gparts[1]} err:{gparts[2]} remaining:{gparts[3]}"
-    elif gaps_remaining == 0:
-        gap_info = "NoGaps (extract ripple-deleted cleanly)"
-
-    # Combine results
-    full_log = extract_log + ("\n" + gap_info if gap_info else "")
-    full_output = f"OK|{extract_count}|{gaps_remaining}|{full_log}"
-
-    return {
-        "status": "ok",
-        "method": "CEP companion",
-        "output": full_output,
-        "editCount": extract_count,
-        "removedCount": extract_count,
-        "log": full_log,
-        "gapResult": gap_result or (gap_info if gap_info else "skipped")
-    }
-
-
-@app.get("/cep-status")
-def cep_status():
-    """Check if CEP companion is responsive by sending a ping."""
-    import time as _time
-    import uuid
-
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    cmd_file = os.path.join(app_dir, "jsx_command.json")
-    result_file = os.path.join(app_dir, "jsx_result.json")
-
-    cmd_id = "ping-" + str(uuid.uuid4())[:4]
-    command = {"id": cmd_id, "action": "ping", "timestamp": _time.time()}
-
-    with open(cmd_file, "w") as f:
-        json.dump(command, f)
-
-    try:
-        os.remove(result_file)
-    except FileNotFoundError:
-        pass
-
-    # Wait up to 5 seconds
-    for _ in range(10):
-        _time.sleep(0.5)
-        if os.path.exists(result_file):
-            try:
-                with open(result_file, "r", encoding="utf-8", errors="replace") as f:
-                    result_data = json.load(f)
-                if result_data.get("id") == cmd_id:
-                    return {"status": "ok", "result": result_data.get("result", "")}
-            except:
-                pass
-
-    return {"status": "error", "message": "CEP companion not responding"}
-
-
-def _generate_apply_cuts_jsx(boundaries, silence_regions):
-    """Generate ExtendScript code to remove silence using extract approach.
-
-    Strategy: Use setInPoint/setOutPoint + qeSeq.extract() for each silence region.
-    Process from LAST to FIRST silence region to preserve earlier timings.
-    extract() = ripple delete (removes content AND closes gap).
-
-    All cut points snapped to frame boundaries so video & audio stay aligned.
-    """
-    silence_js = json.dumps(silence_regions)
-
-    extract_code = (
-        '(function(){'
-        'var TICKS=254016000000;'
-        'var sr=' + silence_js + ';'
-        'var log=[];'
-        'try{app.enableQE();}catch(e){return "ERROR:QE:"+e.message;}'
-        'var qeSeq;try{qeSeq=qe.project.getActiveSequence();}catch(e){return "ERROR:"+e.message;}'
-        'if(!qeSeq)return "ERROR:No QE seq";'
-        'var seq=app.project.activeSequence;'
-        'if(!seq)return "ERROR:No seq";'
-        'var nV=seq.videoTracks.numTracks;var nA=seq.audioTracks.numTracks;'
-
-        # ── Detect frame rate ──
-        # Method 1: sequence timebase property (most reliable)
-        'var fps=0;'
-        'try{var tb=seq.timebase;if(tb){fps=parseFloat(tb);}}catch(ex){}'
-        # Method 2: calculate from first video clip ticks vs seconds
-        'if(fps<=0||fps>120){'
-        'try{'
-        'var c0=seq.videoTracks[0].clips[0];'
-        'var durSec=c0.end.seconds-c0.start.seconds;'
-        'var durTicks=parseFloat(c0.end.ticks)-parseFloat(c0.start.ticks);'
-        'if(durSec>0&&durTicks>0){'
-        'var frameTicks=TICKS/24;'
-        'var tryFps=[23.976,24,25,29.97,30,50,59.94,60];'
-        'for(var fi=0;fi<tryFps.length;fi++){'
-        'var ft=TICKS/tryFps[fi];'
-        'var nFrames=Math.round(durTicks/ft);'
-        'if(Math.abs(nFrames*ft-durTicks)<ft*0.01){fps=tryFps[fi];break;}'
-        '}'
-        '}'
-        '}catch(ex){}}'
-        # Method 3: fallback to 25fps (PAL) — common for video editing
-        'if(fps<=0||fps>120)fps=25;'
-        'var frameDur=1.0/fps;'
-        'log.push("fps:"+fps.toFixed(3));'
-
-        # Snap to nearest frame boundary
-        'function snap(sec){return Math.round(sec*fps)/fps;}'
-
-        # ── Target ALL tracks ──
-        'for(var t=0;t<nV;t++){try{seq.videoTracks[t].setTargeted(true,true);}catch(e){try{seq.videoTracks[t].setTargeted(true);}catch(e2){}}}'
-        'for(var t=0;t<nA;t++){try{seq.audioTracks[t].setTargeted(true,true);}catch(e){try{seq.audioTracks[t].setTargeted(true);}catch(e2){}}}'
-
-        # ── Sort descending (process end→start to preserve timecodes) ──
-        'var sorted=sr.slice(0);sorted.sort(function(a,b){return b[0]-a[0];});'
-        'var ok=0;var er=0;var skip=0;'
-        'for(var i=0;i<sorted.length;i++){'
-        'var s=snap(sorted[i][0]);var e2=snap(sorted[i][1]);'
-        # Skip if snapped region is less than 1 frame
-        'if(e2-s<frameDur*0.9){skip++;continue;}'
-        'try{'
-        'seq.setInPoint(Math.round(s*TICKS).toString());'
-        'seq.setOutPoint(Math.round(e2*TICKS).toString());'
-        'qeSeq.extract();ok++;'
-        '}catch(ex){er++;log.push("ex:"+ex.message);}'
-        '}'
-        # Clear in point
-        'try{seq.setInPoint("0");}catch(ex){}'
-        'log.push("Tracks V:"+nV+" A:"+nA);'
-        'log.push("Extracted:"+ok+"/"+sorted.length+" skip:"+skip+" err:"+er);'
-
-        # ── Verify V/A alignment ──
-        'try{'
-        'var nClips=Math.min(4,seq.videoTracks[0].clips.numItems);'
-        'var aClips=seq.audioTracks[0].clips.numItems;'
-        'log.push("Clips V:"+nClips+" A:"+aClips);'
-        'var maxD=0;'
-        'for(var c=0;c<Math.min(nClips,aClips);c++){'
-        'var vs=seq.videoTracks[0].clips[c].start.seconds;'
-        'var as2=seq.audioTracks[0].clips[c].start.seconds;'
-        'var d=Math.abs(vs-as2);if(d>maxD)maxD=d;'
-        'log.push("c"+c+" V:"+vs.toFixed(4)+" A:"+as2.toFixed(4)+" d:"+d.toFixed(4));'
-        '}'
-        'log.push("maxDrift:"+maxD.toFixed(4)+"s");'
-        '}catch(ex){log.push("align:"+ex.message);}'
-
-        # ── Check for remaining gaps ──
-        'var gaps=0;'
-        'try{'
-        'for(var c=1;c<seq.videoTracks[0].clips.numItems;c++){'
-        'var pe=parseFloat(seq.videoTracks[0].clips[c-1].end.ticks);'
-        'var cs=parseFloat(seq.videoTracks[0].clips[c].start.ticks);'
-        'if(Math.abs(cs-pe)>1000)gaps++;'
-        '}'
-        'log.push("gaps:"+gaps);'
-        '}catch(ex){}'
-
-        'return "OK|"+ok+"|"+gaps+"|"+log.join("\\n");'
-        '})();'
-    )
-    return extract_code
-
-
-@app.post("/apply-cuts-keyboard")
-def apply_cuts_keyboard(req: ApplyCutsRequest):
-    """
-    Apply cuts using keyboard shortcut simulation via osascript.
-    This approach:
-    1. Uses CEP to set player position at each boundary
-    2. Uses osascript/System Events to send Cmd+Shift+D (Add Edit to All Tracks)
-    3. Then uses CEP to remove silence clips
-
-    This is the fallback when QE DOM razor() silently fails.
-    """
-    import time as _time
-    import uuid
-
-    boundaries = sorted(req.boundaries)
-    silence_regions = req.silence_regions
-
-    if not boundaries:
-        return {"status": "error", "errors": ["No boundaries provided"]}
-
-    app_dir = os.path.expanduser("~/.easyscript")
-    os.makedirs(app_dir, exist_ok=True)
-    cmd_file = os.path.join(app_dir, "jsx_command.json")
-    result_file = os.path.join(app_dir, "jsx_result.json")
-
-    # Find Premiere Pro process name
-    premiere_app = "Adobe Premiere Pro"
-    try:
-        ps_result = subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to get name of every process whose name contains "Premiere"'],
-            capture_output=True, text=True, timeout=5
-        )
-        if ps_result.returncode == 0 and ps_result.stdout.strip():
-            premiere_app = ps_result.stdout.strip().split(",")[0].strip()
-    except:
-        pass
-
-    log = [f"App: {premiere_app}", f"Boundaries: {len(boundaries)}", f"Silence: {len(silence_regions)}"]
-
-    def send_cep_command(cmd_id, jsx_code, timeout=10):
-        """Send command to CEP and wait for result."""
-        command = {"id": cmd_id, "action": "eval", "code": jsx_code, "timestamp": _time.time()}
-        with open(cmd_file, "w") as f:
-            json.dump(command, f)
-        try:
-            os.remove(result_file)
-        except FileNotFoundError:
-            pass
-
-        for _ in range(int(timeout / 0.3)):
-            _time.sleep(0.3)
-            if os.path.exists(result_file):
-                try:
-                    with open(result_file, "r", encoding="utf-8", errors="replace") as f:
-                        result_data = json.load(f)
-                    if result_data.get("id") == cmd_id:
-                        return result_data.get("result", "")
-                except:
-                    pass
-        return None
-
-    def send_keyboard_shortcut(key, modifiers="command down, shift down"):
-        """Send a keyboard shortcut to Premiere Pro via osascript."""
-        script = f'''
-        tell application "System Events"
-            tell process "{premiere_app}"
-                set frontmost to true
-                keystroke "{key}" using {{{modifiers}}}
-            end tell
-        end tell
-        '''
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=5
-            )
-            return result.returncode == 0
-        except:
-            return False
-
-    # Step 1: Count clips before
-    count_jsx = """
-    (function() {
-        var seq = app.project.activeSequence;
-        if (!seq) return "ERROR:no seq";
-        var n = 0;
-        for (var t = 0; t < seq.videoTracks.numTracks; t++) n += seq.videoTracks[t].clips.numItems;
-        for (var t = 0; t < seq.audioTracks.numTracks; t++) n += seq.audioTracks[t].clips.numItems;
-        return "CLIPS:" + n;
-    })();
-    """
-    count_result = send_cep_command("cnt-" + str(uuid.uuid4())[:4], count_jsx)
-    if not count_result:
-        return {"status": "error", "errors": [
-            "CEP companion not responding. Please:",
-            "1. Open Premiere Pro",
-            "2. Go to Window > Extensions > Pro Cut Helper",
-            "3. The panel should show 'Polling for commands...'"
-        ]}
-
-    clips_before = 0
-    if count_result.startswith("CLIPS:"):
-        clips_before = int(count_result.split(":")[1])
-    log.append(f"Clips before: {clips_before}")
-
-    # Step 2: For each boundary, set playhead + send keyboard shortcut
-    edit_count = 0
-    TICKS = 254016000000
-
-    for i, boundary in enumerate(boundaries):
-        ticks = str(int(round(boundary * TICKS)))
-
-        # Set playhead position via CEP
-        set_pos_jsx = f"""
-        (function() {{
-            var seq = app.project.activeSequence;
-            if (!seq) return "ERR";
-            seq.setPlayerPosition("{ticks}");
-            return "OK";
-        }})();
-        """
-        pos_result = send_cep_command(f"pos-{i}", set_pos_jsx, timeout=5)
-        if pos_result != "OK":
-            log.append(f"Boundary {i}: setPlayerPosition failed: {pos_result}")
-            continue
-
-        # Small delay to let Premiere update
-        _time.sleep(0.05)
-
-        # Send Cmd+Shift+D = "Add Edit to All Tracks"
-        if send_keyboard_shortcut("d"):
-            edit_count += 1
-        else:
-            log.append(f"Boundary {i}: keyboard shortcut failed")
-
-        # Small delay between cuts
-        _time.sleep(0.05)
-
-    log.append(f"Edit commands sent: {edit_count}")
-
-    # Wait for Premiere to finish processing
-    _time.sleep(0.5)
-
-    # Step 3: Count clips after
-    count_result2 = send_cep_command("cnt2-" + str(uuid.uuid4())[:4], count_jsx)
-    clips_after = 0
-    if count_result2 and count_result2.startswith("CLIPS:"):
-        clips_after = int(count_result2.split(":")[1])
-    log.append(f"Clips after: {clips_after}")
-
-    if clips_after <= clips_before:
-        log.append("KEYBOARD CUTS DID NOT WORK - aborting remove")
-        return {
-            "status": "ok",
-            "method": "keyboard",
-            "output": f"OK|{edit_count}|0|" + "\n".join(log),
-            "editCount": edit_count,
-            "removedCount": 0,
-            "log": "\n".join(log)
-        }
-
-    # Step 4: Remove silence clips via CEP
-    silence_js = json.dumps(silence_regions)
-    remove_jsx = f"""
-    (function() {{
-        var seq = app.project.activeSequence;
-        if (!seq) return "ERROR:no seq";
-        var silenceRegions = {silence_js};
-        var TOL = 0.2;
-        var removed = 0;
-
-        function isSilence(cs, ce) {{
-            for (var r = 0; r < silenceRegions.length; r++) {{
-                var ss = silenceRegions[r][0];
-                var se = silenceRegions[r][1];
-                if (Math.abs(cs - ss) < TOL && Math.abs(ce - se) < TOL) return true;
-                if (cs >= ss - TOL && ce <= se + TOL) return true;
-            }}
-            return false;
-        }}
-
-        for (var t = seq.videoTracks.numTracks - 1; t >= 0; t--) {{
-            var track = seq.videoTracks[t];
-            for (var c = track.clips.numItems - 1; c >= 0; c--) {{
-                try {{
-                    var clip = track.clips[c];
-                    if (isSilence(clip.start.seconds, clip.end.seconds)) {{
-                        clip.remove(false, true);
-                        removed++;
-                    }}
-                }} catch(e) {{}}
-            }}
-        }}
-        for (var t = seq.audioTracks.numTracks - 1; t >= 0; t--) {{
-            var track = seq.audioTracks[t];
-            for (var c = track.clips.numItems - 1; c >= 0; c--) {{
-                try {{
-                    var clip = track.clips[c];
-                    if (isSilence(clip.start.seconds, clip.end.seconds)) {{
-                        clip.remove(false, true);
-                        removed++;
-                    }}
-                }} catch(e) {{}}
-            }}
-        }}
-        return "REMOVED:" + removed;
-    }})();
-    """
-    remove_result = send_cep_command("rm-" + str(uuid.uuid4())[:4], remove_jsx, timeout=15)
-    removed_count = 0
-    if remove_result and remove_result.startswith("REMOVED:"):
-        removed_count = int(remove_result.split(":")[1])
-    log.append(f"Removed: {removed_count}")
-
-    return {
-        "status": "ok",
-        "method": "keyboard",
-        "output": f"OK|{edit_count}|{removed_count}|" + "\n".join(log),
-        "editCount": edit_count,
-        "removedCount": removed_count,
-        "log": "\n".join(log)
-    }
+# Removed (security): the legacy Premiere bridge endpoints — /find-file,
+# /resolve-nested, /apply-speaker-labels, /execute-jsx, /split-at-points,
+# /test-razor, /label-clips-jsx, /diag-jsx, /diag-label, /apply-cuts,
+# /cep-status, /apply-cuts-keyboard. They drove Premiere through a file-IPC
+# companion panel that evals arbitrary code, or through osascript (/execute-jsx
+# ran any ExtendScript it was sent). The CEP panel talks to Premiere directly
+# via host.jsx; nothing current calls these.
 
 
 # ── Live Transcription (WebSocket) — LocalAgreement-2 + Sliding Window ──

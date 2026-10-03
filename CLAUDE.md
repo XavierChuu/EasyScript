@@ -16,6 +16,17 @@
 - Run dev server: `cd backend && python server.py`
 - Run dev frontend: `npx serve ./plugin`
 - Load plugin: UXP Developer Tool → Add Plugin → select `plugin/manifest.json`
+- Backend tests: `python -m unittest discover -s backend/tests -t backend`
+- Premiere panel (current): `cep-extension-v2.1/` (CEP + ExtendScript `host.jsx`)
+
+## Backend access token
+- Every request needs the per-launch token (`backend/security.py`): header
+  `X-EasyScript-Token`, or `?token=` for `<audio src>` / WebSocket. Only `/health` is open.
+- The panel reads it from `~/.easyscript/token-<port>` via ExtendScript; the
+  standalone app gets it injected by `main.py`.
+- Browser dev of the CEP panel: run the backend with `EASYSCRIPT_TOKEN=dev`
+  (optionally `PORT=9877`) and open `index.html?token=dev&port=9877`.
+  `EASYSCRIPT_AUTH=off` disables the check — never ship that.
 
 ## Phase Roadmap
 1. Audio analysis backend (faster-whisper + silence detection)

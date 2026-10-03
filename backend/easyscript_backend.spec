@@ -190,7 +190,7 @@ if platform.system() == "Darwin" and platform.machine() == "arm64":
         pass
 
 a = Analysis(
-    ["main.py"],
+    ["backend_main.py"],
     pathex=[],
     binaries=mlx_binaries + torchcodec_binaries + ffmpeg_binaries + nvidia_binaries,
     datas=faster_whisper_data + ctranslate2_data + scipy_data + pyannote_data + speechbrain_data + torchcodec_data + mlx_data + demucs_data + transformers_data + package_metadata + plugin_files + ffmpeg_data + soundfile_data + lightning_data + collect_data_files("torchmetrics", include_py_files=True) + [
@@ -322,7 +322,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="EasyScript",
+    name="EasyScript-backend",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -339,20 +339,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="EasyScript",
+    name="EasyScript-backend",
 )
-
-# macOS .app bundle
-if platform.system() == "Darwin":
-    app = BUNDLE(
-        coll,
-        name="EasyScript.app",
-        icon=None,  # Add .icns path here
-        bundle_identifier="com.easyscript.app",
-        info_plist={
-            "CFBundleShortVersionString": "1.0.0",
-            "CFBundleName": "EasyScript",
-            "NSHighResolutionCapable": True,
-            "NSMicrophoneUsageDescription": "EasyScript needs microphone access for live transcription.",
-        },
-    )

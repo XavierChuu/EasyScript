@@ -60,14 +60,20 @@ def start_server(port, frontend_dir):
         from server import app
         _log("[3] server.app imported")
         from starlette.responses import HTMLResponse, Response
+        import security
         _log("[4] starlette imported")
 
-        # Read and inject BACKEND_URL into index.html
+        # Read and inject BACKEND_URL + the session token into index.html. The
+        # page itself is served without a token; other origins can't read it
+        # (CORS) and the Host check stops DNS-rebinding reads.
         index_path = os.path.join(frontend_dir, "index.html")
         with open(index_path, "r", encoding="utf-8") as f:
             index_html = f.read()
-        inject = f'<script>window.BACKEND_URL = "http://127.0.0.1:{port}";</script>'
+        inject = (f'<script>window.BACKEND_URL = "http://127.0.0.1:{port}";'
+                  f'window.EASYSCRIPT_TOKEN = "{security.get_token()}";</script>')
         index_html = index_html.replace("</head>", f"  {inject}\n</head>")
+        security.add_exempt_paths(["/", "/plugin/index.html", "/styles.css",
+                                   "/plugin/styles.css", "/index.js", "/plugin/index.js"])
 
         @app.get("/", response_class=HTMLResponse)
         async def serve_index():

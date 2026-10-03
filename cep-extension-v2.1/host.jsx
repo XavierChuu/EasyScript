@@ -80,6 +80,58 @@ if (typeof JSON.parse !== "function") {
 var TICKS_PER_SECOND = 254016000000;
 
 /**
+ * Exact ticks per frame of a sequence. `seq.timebase` is the canonical value
+ * (a string: 8475667200 for 29.97, 10594584000 for 23.976). Never derive the
+ * frame grid from a rounded fps — 30 instead of 29.97 drifts 3.6 s per hour.
+ */
+function _seqTicksPerFrame(seq) {
+    var tpf = 0;
+    try { tpf = parseFloat(seq.timebase); } catch (e) {}
+    if (!(tpf > 0)) { try { tpf = parseFloat(seq.getSettings().videoFrameRate.ticks); } catch (e2) {} }
+    if (!(tpf > 0)) {
+        try {
+            var s = seq.getSettings().videoFrameRate.seconds;
+            if (s > 0) tpf = Math.round(s * TICKS_PER_SECOND);
+        } catch (e3) {}
+    }
+    if (!(tpf > 0)) tpf = TICKS_PER_SECOND / 25;
+    return tpf;
+}
+
+/** Drop-frame display? The QE CTI timecode uses ';' separators when it is. */
+function _isDropFrame() {
+    try {
+        app.enableQE();
+        var q = qe.project.getActiveSequence();
+        return String(q.CTI.timecode).indexOf(";") >= 0;
+    } catch (e) { return false; }
+}
+
+function _pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+/** Frame count → SMPTE timecode string (drop-frame aware) for QE razor. */
+function _framesToTimecode(frames, nominal, dropFrame) {
+    var f = Math.max(0, Math.round(frames));
+    if (dropFrame) {
+        var drop = Math.round(nominal / 15);           // 2 for 29.97, 4 for 59.94
+        var per10 = nominal * 600 - drop * 9;
+        var perMin = nominal * 60 - drop;
+        var d = Math.floor(f / per10), m = f % per10;
+        f += drop * 9 * d + (m > drop ? drop * Math.floor((m - drop) / perMin) : 0);
+    }
+    var ff = f % nominal, ss = Math.floor(f / nominal) % 60;
+    var mm = Math.floor(f / (nominal * 60)) % 60, hh = Math.floor(f / (nominal * 3600));
+    return _pad2(hh) + ":" + _pad2(mm) + ":" + _pad2(ss) + (dropFrame ? ";" : ":") + _pad2(ff);
+}
+
+/** Timecode of `sec` on the active sequence's real frame grid. */
+function _timecodeAt(seq, sec, dropFrame) {
+    var tpf = _seqTicksPerFrame(seq);
+    var nominal = Math.round(TICKS_PER_SECOND / tpf);
+    return _framesToTimecode(Math.round(sec * TICKS_PER_SECOND / tpf), nominal, dropFrame);
+}
+
+/**
  * Inspect a timeline clip's color/label API via ExtendScript reflection, so we
  * can call the right per-clip method. Uses the selected clip, else the first.
  */
@@ -132,15 +184,92 @@ function proCutPing() {
     }
 }
 
-/** Active sequence frame rate (fps), as a string. */
+/** Active sequence frame rate (fps, NOT rounded: "29.97002997..."), as a string. */
 function esSequenceFps() {
     try {
         var seq = app.project.activeSequence;
         if (!seq) return "25";
-        var fr = seq.getSettings().videoFrameRate.seconds; // seconds per frame
-        if (fr > 0) return String(Math.round(1 / fr));
+        return String(TICKS_PER_SECOND / _seqTicksPerFrame(seq));
     } catch (e) {}
     return "25";
+}
+
+/** Exact timebase of the active sequence. JSON {ok, ticksPerFrame, fps, sequenceID, name, endTicks}. */
+function esSequenceTimebase() {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ ok: false, error: "No active sequence — open a sequence first." });
+        var tpf = _seqTicksPerFrame(seq);
+        var endTicks = "0";
+        try { endTicks = String(seq.end); } catch (e) {}
+        return JSON.stringify({
+            ok: true, ticksPerFrame: tpf, fps: TICKS_PER_SECOND / tpf,
+            sequenceID: String(seq.sequenceID), name: seq.name, endTicks: endTicks
+        });
+    } catch (e) {
+        return JSON.stringify({ ok: false, error: e.message });
+    }
+}
+
+/** Move the Premiere playhead (CTI) to `ticks` (string). */
+function esSetPlayerPosition(ticks) {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return "NOSEQ";
+        seq.setPlayerPosition(String(ticks));
+        return "OK";
+    } catch (e) { return "ERROR: " + e.message; }
+}
+
+/** Premiere playhead position in ticks (string), or "" without a sequence. */
+function esGetPlayerPosition() {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return "";
+        return String(seq.getPlayerPosition().ticks);
+    } catch (e) { return ""; }
+}
+
+/** Audio tracks of the active sequence: JSON {ok, sequenceID, tracks:[{index, name, clips}]}. */
+function esListAudioTracks() {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ ok: false, error: "No active sequence" });
+        var out = [];
+        for (var i = 0; i < seq.audioTracks.numTracks; i++) {
+            var t = seq.audioTracks[i], nm = "";
+            try { nm = t.name; } catch (e) {}
+            out.push({ index: i, name: nm || ("Audio " + (i + 1)), clips: t.clips.numItems });
+        }
+        return JSON.stringify({ ok: true, sequenceID: String(seq.sequenceID), name: seq.name, tracks: out });
+    } catch (e) {
+        return JSON.stringify({ ok: false, error: e.message });
+    }
+}
+
+/**
+ * The backend's per-launch access token (written to ~/.easyscript/token-<port>).
+ * Returned raw (URL-safe characters only). "~" is resolved several ways because
+ * ExtendScript's home and Python's home have differed on some Windows setups.
+ */
+function esReadBackendToken(port) {
+    var bases = [];
+    try { bases.push(Folder("~").fsName); } catch (e) {}
+    try { if ($.getenv("USERPROFILE")) bases.push($.getenv("USERPROFILE")); } catch (e2) {}
+    try { if ($.getenv("HOME")) bases.push($.getenv("HOME")); } catch (e3) {}
+    for (var i = 0; i < bases.length; i++) {
+        try {
+            var f = new File(bases[i] + "/.easyscript/token-" + parseInt(port, 10));
+            if (!f.exists) continue;
+            f.encoding = "UTF-8";
+            if (!f.open("r")) continue;
+            var s = f.read();
+            f.close();
+            s = String(s).replace(/[^A-Za-z0-9_\-]/g, "");
+            if (s) return s;
+        } catch (e4) {}
+    }
+    return "";
 }
 
 /**
@@ -153,7 +282,8 @@ function esGetSelectedClip(mode, trackIdx) {
         var seq = app.project.activeSequence;
         if (!seq) return JSON.stringify({ ok: false, error: "No active sequence — open a sequence first." });
 
-        var fps = parseInt(esSequenceFps(), 10) || 25;
+        var tpf = _seqTicksPerFrame(seq);
+        var fps = TICKS_PER_SECOND / tpf;
         var ti = parseInt(trackIdx, 10);
         var tracks = seq.audioTracks;
         var startT = (ti >= 0) ? ti : 0;
@@ -196,15 +326,20 @@ function esGetSelectedClip(mode, trackIdx) {
 
         var name = "";  try { name = found.name; } catch (e) {}
         var path = "";  try { path = found.projectItem.getMediaPath(); } catch (e) {}
-        var start = 0, end = 0, inPoint = 0, outPoint = 0;
-        try { start = found.start.seconds; end = found.end.seconds; } catch (e) {}
+        var nodeId = ""; try { nodeId = String(found.projectItem.nodeId); } catch (e) {}
+        var start = 0, end = 0, inPoint = 0, outPoint = 0, startTicks = "0";
+        try { start = found.start.seconds; end = found.end.seconds; startTicks = String(found.start.ticks); } catch (e) {}
         try { inPoint = found.inPoint.seconds; } catch (e) {}
         try { outPoint = found.outPoint.seconds; } catch (e) {}
 
         // No media path → nested sequence (or generated clip). Return the clip
         // anyway with nested:true so the frontend renders the range instead.
         // start/end = sequence time; inPoint/outPoint = source time of the trimmed clip.
-        return JSON.stringify({ ok: true, path: path || "", nested: !path, name: name, start: start, end: end, inPoint: inPoint, outPoint: outPoint, fps: fps });
+        return JSON.stringify({
+            ok: true, path: path || "", nested: !path, name: name, start: start, end: end,
+            startTicks: startTicks, inPoint: inPoint, outPoint: outPoint, fps: fps,
+            ticksPerFrame: tpf, nodeId: nodeId, sequenceID: String(seq.sequenceID)
+        });
     } catch (e) {
         return JSON.stringify({ ok: false, error: e.message });
     }
@@ -217,13 +352,17 @@ function esGetSelectedClip(mode, trackIdx) {
  * awaits the razor, then issues a second call by which time the DOM is updated.
  */
 
-/** seconds → "HH:MM:SS:FF" timecode at the given fps. */
-function _toTimecode(sec, fps) {
-    if (!fps || fps < 1) fps = 25;
-    var f = Math.round(sec * fps);
-    function p(n) { return (n < 10 ? "0" : "") + n; }
-    return p(Math.floor(f / (fps * 3600))) + ":" + p(Math.floor(f / (fps * 60)) % 60) +
-           ":" + p(Math.floor(f / fps) % 60) + ":" + p(f % fps);
+/**
+ * seconds → timecode for QE razor, on the active sequence's REAL frame grid
+ * (drop-frame aware). The old version used an integer fps, so on 29.97/23.976
+ * sequences razor points drifted ~3.6 s/hour late — cutting into speech.
+ * `fps` is ignored; kept so existing callers still work.
+ */
+function _toTimecode(sec, fps, dropFrame) {
+    var seq = app.project.activeSequence;
+    if (seq) return _timecodeAt(seq, sec, dropFrame === undefined ? _isDropFrame() : dropFrame);
+    var nominal = Math.round(fps) || 25;
+    return _framesToTimecode(Math.round(sec * (fps || 25)), nominal, false);
 }
 
 /**
@@ -244,8 +383,9 @@ function proCutRazor(dataJson) {
 
         var beforeV = (qeSeq.numVideoTracks > 0) ? qeSeq.getVideoTrackAt(0).numItems : -1;
         var edits = 0;
+        var df = _isDropFrame();
         for (var i = 0; i < boundaries.length; i++) {
-            var tc = _toTimecode(boundaries[i], fps);
+            var tc = _toTimecode(boundaries[i], fps, df);
             for (var v = 0; v < qeSeq.numVideoTracks; v++) { try { qeSeq.getVideoTrackAt(v).razor(tc); edits++; } catch (e) {} }
             for (var a = 0; a < qeSeq.numAudioTracks; a++) { try { qeSeq.getAudioTrackAt(a).razor(tc); edits++; } catch (e) {} }
         }
@@ -335,8 +475,9 @@ function proCutChunkQE(dataJson) {
 
         // 1) Razor at every boundary on every track.
         var edits = 0;
+        var df = _isDropFrame();
         for (var i = 0; i < boundaries.length; i++) {
-            var tc = _toTimecode(boundaries[i], fps);
+            var tc = _toTimecode(boundaries[i], fps, df);
             for (var v = 0; v < qeSeq.numVideoTracks; v++) { try { qeSeq.getVideoTrackAt(v).razor(tc); edits++; } catch (e) {} }
             for (var a = 0; a < qeSeq.numAudioTracks; a++) { try { qeSeq.getAudioTrackAt(a).razor(tc); edits++; } catch (e) {} }
         }
@@ -406,15 +547,76 @@ function proCutChunkQE(dataJson) {
  * Regions are processed RIGHT→LEFT so each extract never shifts the (still
  * original) coordinates of regions not yet processed.
  *
- * dataJson:{ silenceRegions:[[s,e]], fps }
+ * dataJson:{ regionsTicks:[[inTicks, outTicks]], sequenceID }
+ *   Frame-aligned sequence ticks, already snapped INWARD by the panel (cut
+ *   start rounded up, end rounded down) so a cut never reaches past its padded
+ *   silence into speech. Legacy {silenceRegions:[[s,e]]} seconds are snapped
+ *   inward here on the sequence's real frame grid.
+ * The user's In/Out points and track targeting are put back afterwards.
  * Returns: "OK|extracted|total|errSample"
  */
+function _ticksStr(x) { return String(Math.round(x)); }
+
+function _getInOutTicks(seq) {
+    var inT = NaN, outT = NaN;
+    try { inT = parseFloat(seq.getInPointAsTime().ticks); outT = parseFloat(seq.getOutPointAsTime().ticks); } catch (e) {}
+    if (isNaN(inT)) {
+        try {
+            inT = parseFloat(seq.getInPoint()) * TICKS_PER_SECOND;
+            outT = parseFloat(seq.getOutPoint()) * TICKS_PER_SECOND;
+        } catch (e2) {}
+    }
+    return { inT: inT, outT: outT };
+}
+
+function _saveTimelineState(seq) {
+    var st = { io: _getInOutTicks(seq), endT: parseFloat(seq.end), v: [], a: [] };
+    var t;
+    for (t = 0; t < seq.videoTracks.numTracks; t++) { try { st.v.push(seq.videoTracks[t].isTargeted()); } catch (e) { st.v.push(null); } }
+    for (t = 0; t < seq.audioTracks.numTracks; t++) { try { st.a.push(seq.audioTracks[t].isTargeted()); } catch (e2) { st.a.push(null); } }
+    return st;
+}
+
+/** Ticks removed before position t by already-extracted [a, b) regions. */
+function _removedBefore(removed, t) {
+    var sum = 0;
+    for (var i = 0; i < removed.length; i++) {
+        var a = removed[i][0], b = removed[i][1];
+        if (a < t) sum += Math.min(b, t) - a;
+    }
+    return sum;
+}
+
+function _setTargeted(track, on) {
+    try { track.setTargeted(on, true); } catch (e) { try { track.setTargeted(on); } catch (e2) {} }
+}
+
+function _restoreTimelineState(seq, st, removed, tpf) {
+    var t;
+    for (t = 0; t < st.v.length && t < seq.videoTracks.numTracks; t++) { if (st.v[t] !== null) _setTargeted(seq.videoTracks[t], st.v[t]); }
+    for (t = 0; t < st.a.length && t < seq.audioTracks.numTracks; t++) { if (st.a[t] !== null) _setTargeted(seq.audioTracks[t], st.a[t]); }
+    try {
+        var io = st.io, newEnd = parseFloat(seq.end);
+        seq.setInPoint("0");
+        if (isNaN(io.inT)) return;
+        var hadNone = io.inT <= 0 && (isNaN(io.outT) || io.outT >= st.endT - tpf);
+        if (hadNone) { seq.setOutPoint(_ticksStr(newEnd)); return; }
+        var ni = Math.max(0, io.inT - _removedBefore(removed, io.inT));
+        var no = Math.max(ni, io.outT - _removedBefore(removed, io.outT));
+        seq.setOutPoint(_ticksStr(no));
+        seq.setInPoint(_ticksStr(ni));
+    } catch (e) {}
+}
+
+function _targetAll(seq) {
+    var t;
+    for (t = 0; t < seq.videoTracks.numTracks; t++) _setTargeted(seq.videoTracks[t], true);
+    for (t = 0; t < seq.audioTracks.numTracks; t++) _setTargeted(seq.audioTracks[t], true);
+}
+
 function proCutExtract(dataJson) {
     try {
         var data = JSON.parse(dataJson);
-        var regions = (data.silenceRegions || []).slice();
-        var fps = data.fps || 25; if (!fps || fps < 1) fps = 25;
-        var frameDur = 1.0 / fps;
         try { app.enableQE(); } catch (e) { return "ERROR: Cannot enable QE: " + e.message; }
         var qeSeq = null;
         try { qeSeq = qe.project.getActiveSequence(); } catch (e) { return "ERROR: No QE sequence: " + e.message; }
@@ -423,33 +625,46 @@ function proCutExtract(dataJson) {
         // (Setting it on the QE sequence does NOT work — that was the bug.)
         var seq = app.project.activeSequence;
         if (!seq) return "ERROR: No active sequence";
-        var TICKS = TICKS_PER_SECOND;
-        var nV = seq.videoTracks.numTracks, nA = seq.audioTracks.numTracks;
+        if (data.sequenceID && String(seq.sequenceID) !== String(data.sequenceID)) {
+            return "ERROR: The active sequence changed since the audio was loaded — load it again.";
+        }
+        var tpf = _seqTicksPerFrame(seq);
+        var regions = [], i, a, b;
+        if (data.regionsTicks) {
+            for (i = 0; i < data.regionsTicks.length; i++) {
+                a = parseFloat(data.regionsTicks[i][0]);
+                b = parseFloat(data.regionsTicks[i][1]);
+                if (b - a >= tpf * 0.5) regions.push([a, b]);
+            }
+        } else {
+            var legacy = data.silenceRegions || [];
+            for (i = 0; i < legacy.length; i++) {
+                a = Math.ceil(legacy[i][0] * TICKS_PER_SECOND / tpf - 1e-6) * tpf;
+                b = Math.floor(legacy[i][1] * TICKS_PER_SECOND / tpf + 1e-6) * tpf;
+                if (b - a >= tpf * 0.5) regions.push([a, b]);
+            }
+        }
 
+        var saved = _saveTimelineState(seq);
         // Target ALL tracks — extract only affects targeted tracks.
-        for (var t = 0; t < nV; t++) { try { seq.videoTracks[t].setTargeted(true, true); } catch (e) { try { seq.videoTracks[t].setTargeted(true); } catch (e2) {} } }
-        for (var t = 0; t < nA; t++) { try { seq.audioTracks[t].setTargeted(true, true); } catch (e) { try { seq.audioTracks[t].setTargeted(true); } catch (e2) {} } }
-
-        function snap(sec) { return Math.round(sec * fps) / fps; }
+        _targetAll(seq);
 
         // Right → left so each extract never shifts not-yet-processed regions.
-        regions.sort(function (a, b) { return b[0] - a[0]; });
+        regions.sort(function (x, y) { return y[0] - x[0]; });
 
-        var extracted = 0, errs = [], skip = 0;
-        for (var i = 0; i < regions.length; i++) {
-            var s = snap(regions[i][0]), e = snap(regions[i][1]);
-            if (e - s < frameDur * 0.9) { skip++; continue; }
-            var inTicks = Math.round(s * TICKS).toString();
-            var outTicks = Math.round(e * TICKS).toString();
+        var extracted = 0, errs = [], removed = [];
+        for (i = 0; i < regions.length; i++) {
             try {
-                seq.setInPoint(inTicks);
-                seq.setOutPoint(outTicks);
+                seq.setInPoint(_ticksStr(regions[i][0]));
+                seq.setOutPoint(_ticksStr(regions[i][1]));
                 qeSeq.extract();
                 extracted++;
-            } catch (ex) { if (errs.length < 5) errs.push("ex@" + s.toFixed(2) + ":" + ex.message); }
+                removed.push(regions[i]);
+            } catch (ex) {
+                if (errs.length < 5) errs.push("ex@" + (regions[i][0] / TICKS_PER_SECOND).toFixed(2) + ":" + ex.message);
+            }
         }
-        // Reset the In point so we don't leave a stray In/Out range.
-        try { seq.setInPoint("0"); } catch (ex) {}
+        _restoreTimelineState(seq, saved, removed, tpf);
 
         return "OK|" + extracted + "|" + regions.length + "|" + errs.join(";");
     } catch (e) {
@@ -470,8 +685,6 @@ function esSplitSpeakers(dataJson) {
     try {
         var data = JSON.parse(dataJson);
         var boundaries = (data.boundaries || []).slice();
-        var fps = data.fps || 25; if (!fps || fps < 1) fps = 25;
-        var frameDur = 1.0 / fps, tol = frameDur * 1.5;
         try { app.enableQE(); } catch (e) { return "ERROR: Cannot enable QE: " + e.message; }
         var qeSeq = null;
         try { qeSeq = qe.project.getActiveSequence(); } catch (e) { return "ERROR: No QE sequence: " + e.message; }
@@ -479,10 +692,12 @@ function esSplitSpeakers(dataJson) {
         var seq = app.project.activeSequence;
         if (!seq) return "ERROR: No active sequence";
         var TICKS = TICKS_PER_SECOND;
-        var nV = seq.videoTracks.numTracks, nA = seq.audioTracks.numTracks;
-
-        for (var t = 0; t < nV; t++) { try { seq.videoTracks[t].setTargeted(true, true); } catch (e) { try { seq.videoTracks[t].setTargeted(true); } catch (e2) {} } }
-        for (var t = 0; t < nA; t++) { try { seq.audioTracks[t].setTargeted(true, true); } catch (e) { try { seq.audioTracks[t].setTargeted(true); } catch (e2) {} } }
+        // Real frame grid (29.97 ≠ 30): boundaries land on the frame Premiere uses.
+        var tpf = _seqTicksPerFrame(seq);
+        var fps = TICKS / tpf;
+        var frameDur = 1.0 / fps, tol = frameDur * 1.5;
+        var saved = _saveTimelineState(seq);
+        _targetAll(seq);
 
         // Existing edit points (clip starts/ends) across all tracks.
         var edges = [];
@@ -499,20 +714,21 @@ function esSplitSpeakers(dataJson) {
             for (var i = 0; i < edges.length; i++) { if (Math.abs(edges[i] - tt) <= tol) return true; }
             return false;
         }
-        function snap(sec) { return Math.round(sec * fps) / fps; }
-
         boundaries.sort(function (a, b) { return b - a; }); // right → left
-        var split = 0, skipped = 0, errs = [];
+        var split = 0, skipped = 0, errs = [], removed = [];
         for (var i = 0; i < boundaries.length; i++) {
-            var tt = snap(boundaries[i]);
-            if (tt <= 0) { skipped++; continue; }
+            var frame = Math.round(boundaries[i] * TICKS / tpf);
+            var tt = frame * tpf / TICKS;
+            if (frame <= 0) { skipped++; continue; }
             if (nearEdge(tt)) { skipped++; continue; } // already cut here (had silence)
-            var inT = Math.round(tt * TICKS).toString();
-            var outT = Math.round((tt + frameDur) * TICKS).toString();
-            try { seq.setInPoint(inT); seq.setOutPoint(outT); qeSeq.extract(); split++; }
+            var inT = frame * tpf, outT = (frame + 1) * tpf;
+            try {
+                seq.setInPoint(_ticksStr(inT)); seq.setOutPoint(_ticksStr(outT)); qeSeq.extract();
+                split++; removed.push([inT, outT]);
+            }
             catch (ex) { if (errs.length < 5) errs.push("ex@" + tt.toFixed(2) + ":" + ex.message); }
         }
-        try { seq.setInPoint("0"); } catch (ex) {}
+        _restoreTimelineState(seq, saved, removed, tpf);
         return "OK|" + split + "|" + skipped + "|" + boundaries.length;
     } catch (e) {
         return "ERROR: " + e.message;
@@ -653,8 +869,20 @@ function esRenderRange(presetPath, mode, startSec, endSec) {
         // is TCC-protected and the backend can't read it).
         var dir = new Folder(Folder("~").fsName + "/.easyscript/renders");
         if (!dir.exists) dir.create();
-        var out = dir.fsName + "/render_" + (new Date().getTime()) + ".wav";
+        // exportAsMediaDirect wants native paths. On Windows the two we build
+        // disagree: CEP's getSystemPath returns forward slashes (it only strips
+        // "file:///"), while Folder.fsName returns backslashes — and we then
+        // concatenate "/" onto it. Premiere rejects the mix with a bare
+        // "Error: Unknown Error". File(...).fsName normalises both, and is a
+        // no-op on macOS where everything is "/" already.
+        var out = new File(dir.fsName + "/render_" + (new Date().getTime()) + ".wav").fsName;
         log.push("out=" + out);
+
+        presetPath = new File(presetPath).fsName;
+        log.push("preset=" + presetPath);
+        if (!new File(presetPath).exists) {
+            return JSON.stringify({ ok: false, error: "preset not found: " + presetPath, log: log.join(" | ") });
+        }
 
         var rngStart = startSec, rngEnd = endSec;
         var setRange = (mode !== "inout" && mode !== "entire" && startSec >= 0 && endSec > startSec);
@@ -688,18 +916,180 @@ function esRenderRange(presetPath, mode, startSec, endSec) {
         }
 
         var f = new File(out);
-        if (!f.exists) return JSON.stringify({ ok: false, error: "no output file (status " + status + ")", log: log.join(" | ") });
+        // Fold the log into `error` too: the panel only surfaces `error`, and
+        // "Unknown Error" on its own says nothing about which path was rejected.
+        if (!f.exists) return JSON.stringify({ ok: false, error: "no output file (status " + status + ") — " + log.join(" | "), log: log.join(" | ") });
         return JSON.stringify({ ok: true, path: out, start: rngStart, end: rngEnd, log: log.join(" | ") });
     } catch (e) {
         return JSON.stringify({ ok: false, error: e.message, log: log.join(" | ") });
     }
 }
 
-/** Import an SRT file into the project (creates a caption item). */
-function esImportSubtitle(srtPath) {
+/** Newest root-bin item whose media path is `path` (just-imported files land there). */
+function _findImportedItem(path) {
+    var want = new File(path).fsName.toLowerCase();
+    var kids = app.project.rootItem.children;
+    for (var i = kids.numItems - 1; i >= 0; i--) {
+        var it = kids[i], mp = "";
+        try { mp = it.getMediaPath(); } catch (e) {}
+        if (mp && new File(mp).fsName.toLowerCase() === want) return it;
+    }
+    return null;
+}
+
+/**
+ * Import an SRT and, when possible, place it on a new caption track of the
+ * active sequence starting at `startSec` (the analysed clip's start).
+ * Returns JSON {ok, imported, captionTrack}.
+ */
+function esImportSubtitle(srtPath, startSec) {
     try {
         var ok = app.project.importFiles([srtPath], true, app.project.rootItem, false);
-        return JSON.stringify({ ok: true, imported: ok });
+        var placed = false, why = "";
+        var seq = app.project.activeSequence;
+        var item = _findImportedItem(srtPath);
+        if (seq && item) {
+            try {
+                seq.createCaptionTrack(item, Number(startSec) || 0, Sequence.CAPTION_FORMAT_SUBTITLE);
+                placed = true;
+            } catch (e) { why = e.message; }
+        } else {
+            why = seq ? "imported item not found" : "no active sequence";
+        }
+        return JSON.stringify({ ok: true, imported: ok, captionTrack: placed, reason: why });
+    } catch (e) {
+        return JSON.stringify({ ok: false, error: e.message });
+    }
+}
+
+/**
+ * Export the active sequence as FCP XML into ~/.easyscript/xml.
+ * Returns JSON {ok, path, name, sequenceID, ticksPerFrame}.
+ */
+function esExportSequenceXML() {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ ok: false, error: "No active sequence" });
+        var dir = new Folder(Folder("~").fsName + "/.easyscript/xml");
+        if (!dir.exists) dir.create();
+        var out = new File(dir.fsName + "/export_" + (new Date().getTime()) + ".xml").fsName;
+        var res = seq.exportAsFinalCutProXML(out, 1);  // 1 = suppress UI
+        if (!new File(out).exists) {
+            return JSON.stringify({ ok: false, error: "Premiere did not write the XML (" + res + ")" });
+        }
+        return JSON.stringify({
+            ok: true, path: out, name: seq.name, sequenceID: String(seq.sequenceID),
+            ticksPerFrame: _seqTicksPerFrame(seq)
+        });
+    } catch (e) {
+        return JSON.stringify({ ok: false, error: e.message });
+    }
+}
+
+/**
+ * Import an FCP XML and open the sequence it creates (preferring `expectName`).
+ * Returns JSON {ok, name, sequenceID}.
+ */
+function esImportSequenceXML(xmlPath, expectName) {
+    try {
+        var proj = app.project, i, before = {};
+        for (i = 0; i < proj.sequences.numSequences; i++) before[String(proj.sequences[i].sequenceID)] = 1;
+        var ok = proj.importFiles([new File(xmlPath).fsName], true, proj.rootItem, false);
+        var found = null;
+        for (i = 0; i < proj.sequences.numSequences; i++) {
+            var s = proj.sequences[i];
+            if (before[String(s.sequenceID)]) continue;
+            if (!found || s.name === expectName) found = s;
+        }
+        if (!found) return JSON.stringify({ ok: false, error: "Imported, but no new sequence appeared (" + ok + ")" });
+        try { proj.openSequence(found.sequenceID); } catch (e) {}
+        return JSON.stringify({ ok: true, name: found.name, sequenceID: String(found.sequenceID) });
+    } catch (e) {
+        return JSON.stringify({ ok: false, error: e.message });
+    }
+}
+
+/** Project item of the analysed clip: same nodeId, starting where it started. */
+function _findClipProjectItem(seq, info) {
+    var groups = [seq.audioTracks, seq.videoTracks], fallback = null;
+    for (var g = 0; g < groups.length; g++) {
+        for (var t = 0; t < groups[g].numTracks; t++) {
+            var clips = groups[g][t].clips;
+            for (var c = 0; c < clips.numItems; c++) {
+                var pi = null;
+                try { pi = clips[c].projectItem; } catch (e) {}
+                if (!pi || String(pi.nodeId) !== String(info.nodeId)) continue;
+                var st = 0;
+                try { st = clips[c].start.seconds; } catch (e2) {}
+                if (Math.abs(st - (info.seqStart || 0)) < 0.01) return pi;
+                if (!fallback) fallback = pi;
+            }
+        }
+    }
+    return fallback;
+}
+
+function _markerCollection(seq, data) {
+    if (data.target === "clip") {
+        var pi = _findClipProjectItem(seq, data.clip || {});
+        if (!pi) return null;
+        return pi.getMarkers();
+    }
+    return seq.markers;
+}
+
+/**
+ * Add markers. dataJson: {target:"sequence"|"clip", clip:{nodeId, seqStart},
+ *   items:[{t (s), name, comment, color (0-7)}]}. Sequence markers take
+ *   sequence time; clip markers take source time of the clip's media.
+ * Returns JSON {ok, added, errors}.
+ */
+function esAddMarkers(dataJson) {
+    try {
+        var data = JSON.parse(dataJson);
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ ok: false, error: "No active sequence" });
+        var coll = _markerCollection(seq, data);
+        if (!coll) return JSON.stringify({ ok: false, error: "The analysed clip is no longer on the timeline" });
+        var items = data.items || [], added = 0, errors = 0;
+        for (var i = 0; i < items.length; i++) {
+            try {
+                var m = coll.createMarker(Number(items[i].t));
+                if (items[i].name) m.name = items[i].name;
+                if (items[i].comment) m.comments = items[i].comment;
+                if (items[i].color !== undefined && items[i].color !== null) {
+                    try { m.setColorByIndex(items[i].color); } catch (ec) {}
+                }
+                added++;
+            } catch (e) { errors++; }
+        }
+        return JSON.stringify({ ok: true, added: added, errors: errors });
+    } catch (e) {
+        return JSON.stringify({ ok: false, error: e.message });
+    }
+}
+
+/**
+ * Delete markers whose comment contains `tag` (only ones EasyScript added).
+ * dataJson: {target, clip, tag}. Returns JSON {ok, removed}.
+ */
+function esClearMarkers(dataJson) {
+    try {
+        var data = JSON.parse(dataJson);
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ ok: false, error: "No active sequence" });
+        var coll = _markerCollection(seq, data);
+        if (!coll) return JSON.stringify({ ok: false, error: "The analysed clip is no longer on the timeline" });
+        var tag = String(data.tag || "EasyScript"), doomed = [];
+        var m = coll.getFirstMarker();
+        while (m) {
+            var c = "";
+            try { c = String(m.comments); } catch (e) {}
+            if (c.indexOf(tag) >= 0) doomed.push(m);
+            m = coll.getNextMarker(m);
+        }
+        for (var i = 0; i < doomed.length; i++) { try { coll.deleteMarker(doomed[i]); } catch (e2) {} }
+        return JSON.stringify({ ok: true, removed: doomed.length });
     } catch (e) {
         return JSON.stringify({ ok: false, error: e.message });
     }

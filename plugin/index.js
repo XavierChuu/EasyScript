@@ -1,5 +1,25 @@
 // BACKEND_URL: overridden by pywebview at runtime, fallback for UXP plugin mode
 let BACKEND_URL = window.BACKEND_URL || "http://localhost:9876";
+
+// Session token: injected by main.py into the page it serves; ?token= for
+// browser dev mode. Every backend request must carry it (see security.py).
+const BACKEND_TOKEN = window.EASYSCRIPT_TOKEN
+  || new URLSearchParams(window.location.search).get("token") || "";
+{
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    const url = typeof input === "string" ? input : (input && input.url) || "";
+    if (BACKEND_TOKEN && url.startsWith(BACKEND_URL)) {
+      const headers = new Headers(init.headers || {});
+      headers.set("X-EasyScript-Token", BACKEND_TOKEN);
+      init = { ...init, headers };
+    }
+    return nativeFetch(input, init);
+  };
+}
+function withToken(url) {
+  return BACKEND_TOKEN ? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(BACKEND_TOKEN)}` : url;
+}
 let segments = [];
 let backendConnected = false;
 let currentAudioPath = "";
@@ -604,7 +624,7 @@ const audioPlayback = {
 
   loadAudio(audioPath) {
     if (isDevMode()) {
-      this.audio.src = `${BACKEND_URL}/audio?path=${encodeURIComponent(audioPath)}`;
+      this.audio.src = withToken(`${BACKEND_URL}/audio?path=${encodeURIComponent(audioPath)}`);
     } else {
       this.audio.src = audioPath;
     }
@@ -4033,7 +4053,7 @@ function initLiveTab() {
     liveWorklet.connect(liveAudioCtx.destination);
 
     // Open WebSocket
-    const wsUrl = BACKEND_URL.replace(/^http/, "ws") + "/ws/live";
+    const wsUrl = withToken(BACKEND_URL.replace(/^http/, "ws") + "/ws/live");
     liveWs = new WebSocket(wsUrl);
 
     liveWs.onopen = () => {

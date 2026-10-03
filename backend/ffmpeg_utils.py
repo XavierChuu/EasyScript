@@ -89,24 +89,43 @@ def run_ffmpeg(args, **kwargs):
     return run_silent([get_ffmpeg_exe(), *args], **kwargs)
 
 
-def get_audio_duration(audio_path):
-    """Get audio duration in seconds using ffmpeg (parses stderr).
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 
-    Replaces ffprobe usage so we only need to ship ffmpeg.exe.
+
+def get_audio_duration(audio_path):
+    """Get audio duration in seconds.
+
+    WAV/FLAC/OGG: read from the header (exact, instant). Otherwise ffmpeg's
+    header parse — without an output, so it doesn't decode the whole file just
+    to print "Duration:" (that took seconds for every call on hour-long media).
+    Falls back to a full decode only when the header can't be trusted.
     """
     try:
-        result = run_ffmpeg(
-            ["-i", str(audio_path), "-f", "null", "-"],
-            capture_output=True, text=True, timeout=30,
-        )
-        # ffmpeg prints "Duration: HH:MM:SS.ms" to stderr while parsing input
-        m = re.search(
-            r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",
-            result.stderr,
-        )
-        if not m:
-            return 0.0
-        h, mn, s = m.groups()
-        return int(h) * 3600 + int(mn) * 60 + float(s)
+        import soundfile as sf
+        info = sf.info(str(audio_path))
+        if info.samplerate > 0 and info.frames > 0:
+            return info.frames / float(info.samplerate)
+    except Exception:
+        pass
+    try:
+        result = run_ffmpeg(["-hide_banner", "-i", str(audio_path)],
+                            capture_output=True, text=True, timeout=30)
+        stderr = result.stderr or ""
+        m = _DURATION_RE.search(stderr)
+        if m and "Estimating duration from bitrate" not in stderr:
+            h, mn, s = m.groups()
+            return int(h) * 3600 + int(mn) * 60 + float(s)
+        # No usable header (or a bitrate estimate): decode and take the last
+        # progress timestamp, which is the real decoded length.
+        result = run_ffmpeg(["-i", str(audio_path), "-vn", "-f", "null", "-"],
+                            capture_output=True, text=True, timeout=600)
+        times = re.findall(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr or "")
+        if times:
+            h, mn, s = times[-1]
+            return int(h) * 3600 + int(mn) * 60 + float(s)
+        if m:
+            h, mn, s = m.groups()
+            return int(h) * 3600 + int(mn) * 60 + float(s)
+        return 0.0
     except Exception:
         return 0.0

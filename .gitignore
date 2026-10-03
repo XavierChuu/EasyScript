@@ -40,3 +40,9 @@ easyscript_uploads/
 .easyscript/
 settings.json
 .env
+
+# CEP signing: private cert and the macOS signer binary stay out of git
+*.p12
+ZXPSignCmd
+ZXPSignCmd.exe
+*.zxp

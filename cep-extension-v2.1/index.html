@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="app-header">
+    <span class="app-title">EasyScript</span>
+    <div class="header-right">
+      <div class="status-badge offline" id="statusBadge" title="Local AI backend">
+        <span class="status-dot"></span><span id="statusText">Offline</span>
+      </div>
+      <button class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 5.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6Zm6.1 3.6-.1-.8.1-.8 1.4-1.1-1.5-2.6-1.7.6a5.7 5.7 0 0 0-1.4-.8L10.6 1.5H7.4l-.3 1.8c-.5.2-1 .5-1.4.8l-1.7-.6-1.5 2.6 1.4 1.1-.1.8.1.8-1.4 1.1 1.5 2.6 1.7-.6c.4.3.9.6 1.4.8l.3 1.8h3.2l.3-1.8c.5-.2 1-.5 1.4-.8l1.7.6 1.5-2.6-1.4-1.1Z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Progress (global, stays visible while scrolling) -->
+  <div class="progress hidden" id="progressContainer">
+    <div class="progress-head">
+      <span class="progress-stage" id="progressStage">Preparing…</span>
+      <span class="progress-percent" id="progressPercent">0%</span>
+      <button class="icon-btn icon-btn-sm" id="progressCancelBtn" title="Cancel" aria-label="Cancel">&#10005;</button>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-foot">
+      <span id="progressElapsed">0:00</span>
+      <span id="progressEta"></span>
+    </div>
+  </div>
+
+  <main class="app-body">
+
+    <!-- Source -->
+    <section class="card" id="sourceSection">
+      <input id="audioPathInput" type="hidden" />
+      <div class="row">
+        <label class="field">
+          <span class="field-label">Range</span>
+          <select id="sourceMode">
+            <option value="selected" selected>Selected clip</option>
+            <option value="entire">Entire sequence</option>
+            <option value="inout">In / Out points</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Track</span>
+          <select id="trackSelect">
+            <option value="0">Audio 1</option>
+            <option value="1">Audio 2</option>
+            <option value="2">Audio 3</option>
+            <option value="all">All (mix)</option>
+          </select>
+        </label>
+      </div>
+      <button class="btn btn-primary btn-block" id="loadAudioBtn">Load audio from timeline</button>
+      <div class="status-line hidden" id="clipInfo"></div>
+      <div class="meta-line hidden" id="audioInfo"></div>
+    </section>
+
+    <!-- Waveform -->
+    <section class="card card-flush wave" id="waveformSection">
+      <div class="wave-toolbar">
+        <button class="icon-btn" id="playBtn" title="Play / pause (Space)" aria-label="Play"><span id="playIcon">&#9654;</span></button>
+        <button class="icon-btn" id="stopBtn" title="Stop" aria-label="Stop">&#9632;</button>
+        <span class="timecode"><span id="currentTime">0:00.00</span><span class="dim"> / </span><span id="totalTime">0:00.00</span></span>
+        <label class="check check-sm" id="skipSilenceLabel" title="Skip cut regions while playing">
+          <input type="checkbox" id="skipSilenceCheck" /><span>Skip cuts</span>
+        </label>
+        <span class="spacer"></span>
+        <button class="icon-btn" id="zoomOutBtn" title="Zoom out (−)" aria-label="Zoom out">&minus;</button>
+        <span class="zoom-level" id="zoomLevel">1×</span>
+        <button class="icon-btn" id="zoomInBtn" title="Zoom in (+)" aria-label="Zoom in">+</button>
+        <button class="btn btn-ghost btn-xs" id="zoomFitBtn" title="Fit the whole clip (0)">Fit</button>
+      </div>
+      <div class="wave-stage" id="waveformWrap" tabindex="0">
+        <canvas id="waveformCanvas"></canvas>
+        <canvas id="waveformOverlay"></canvas>
+        <div class="wave-tooltip hidden" id="waveformTooltip"></div>
+      </div>
+      <div class="wave-overview" id="waveformOverview" title="Overview — click or drag to move the view">
+        <canvas id="overviewCanvas"></canvas>
+      </div>
+      <div class="wave-footer">
+        <span class="legend"><i class="sw sw-speech"></i>Speech</span>
+        <span class="legend"><i class="sw sw-silence"></i>Silence</span>
+        <span class="legend"><i class="sw sw-breath"></i>Breath</span>
+        <span class="legend"><i class="sw sw-cut"></i>Cut</span>
+        <span class="legend"><i class="sw sw-beat"></i>Beat</span>
+        <span class="spacer"></span>
+        <span class="wave-view" id="waveformTime" title="Alt/Ctrl + wheel: zoom · Shift + wheel: scroll · drag: pan"></span>
+      </div>
+      <audio id="audioPlayer" preload="auto"></audio>
+    </section>
+
+    <!-- Workflow tabs -->
+    <nav class="tabs" role="tablist">
+      <button class="tab active" role="tab" data-tab="cut">Cut</button>
+      <button class="tab" role="tab" data-tab="text">Transcript</button>
+      <button class="tab" role="tab" data-tab="beats">Beats</button>
+    </nav>
+
+    <!-- ═══ Cut ═══ -->
+    <section class="tab-panel" id="tab-cut">
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Silence</span>
+          <span class="card-meta" id="cutStats"></span>
+        </div>
+        <button class="btn btn-primary btn-block" id="autoCutBtn" title="Detect silence & breath segments">Detect silence</button>
+        <div class="controls" id="cutSettingsPanel">
+          <div class="control">
+            <label class="control-label" for="paddingBefore" title="Speech kept before each cut">Padding before</label>
+            <input type="range" id="paddingBefore" min="0" max="500" value="100" step="10" />
+            <span class="control-value" id="paddingBeforeVal">100ms</span>
+          </div>
+          <div class="control">
+            <label class="control-label" for="paddingAfter" title="Speech kept after each cut">Padding after</label>
+            <input type="range" id="paddingAfter" min="0" max="500" value="100" step="10" />
+            <span class="control-value" id="paddingAfterVal">100ms</span>
+          </div>
+          <div class="control">
+            <label class="control-label" for="minSilence" title="Shorter pauses are kept">Min silence</label>
+            <input type="range" id="minSilence" min="100" max="2000" value="500" step="50" />
+            <span class="control-value" id="minSilenceVal">500ms</span>
+          </div>
+          <div class="control">
+            <label class="control-label" for="silenceThresh" title="Quieter than this counts as silence — re-run Detect silence after changing">Threshold</label>
+            <input type="range" id="silenceThresh" min="-60" max="-15" value="-30" step="1" />
+            <span class="control-value" id="silenceThreshVal">-30dB</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span class="card-title">Apply</span></div>
+        <div class="btn-grid">
+          <button class="btn" id="applyCutBtn" title="Ripple-delete every cut directly on the active sequence">Apply on timeline</button>
+          <button class="btn" id="exportXmlBtn" title="Build a cut copy of the sequence as XML — one import, fastest for long videos, original untouched">Cut to new sequence</button>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="xmlImportCheck" checked />
+          <span>Import the XML and open the new sequence</span>
+        </label>
+        <p class="hint">Long videos: <b>Cut to new sequence</b> rebuilds the edit in one step instead of one timeline edit per cut, and keeps the original sequence. The XML is also saved to the export folder (Premiere, Resolve, FCP 7).</p>
+      </div>
+    </section>
+
+    <!-- ═══ Transcript ═══ -->
+    <section class="tab-panel hidden" id="tab-text">
+      <div class="card">
+        <div class="row">
+          <label class="field">
+            <span class="field-label">Model</span>
+            <select id="modelSelect">
+              <option value="tiny">Tiny — fast</option>
+              <option value="base">Base</option>
+              <option value="small">Small</option>
+              <option value="medium">Medium</option>
+              <option value="large-v3" selected>Large V3 — best</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Language</span>
+            <select id="languageSelect">
+              <option value="">Auto-detect</option>
+              <option value="vi">Vietnamese</option>
+              <option value="en">English</option>
+              <option value="zh">Chinese</option>
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="es">Spanish</option>
+              <option value="pt">Portuguese</option>
+              <option value="it">Italian</option>
+              <option value="ru">Russian</option>
+              <option value="th">Thai</option>
+              <option value="id">Indonesian</option>
+              <option value="ms">Malay</option>
+              <option value="tl">Filipino</option>
+              <option value="hi">Hindi</option>
+              <option value="bn">Bengali</option>
+              <option value="ar">Arabic</option>
+              <option value="he">Hebrew</option>
+              <option value="fa">Persian</option>
+              <option value="tr">Turkish</option>
+              <option value="nl">Dutch</option>
+              <option value="pl">Polish</option>
+              <option value="uk">Ukrainian</option>
+              <option value="cs">Czech</option>
+              <option value="sv">Swedish</option>
+              <option value="da">Danish</option>
+              <option value="fi">Finnish</option>
+              <option value="no">Norwegian</option>
+              <option value="el">Greek</option>
+              <option value="hu">Hungarian</option>
+              <option value="ro">Romanian</option>
+              <option value="bg">Bulgarian</option>
+              <option value="hr">Croatian</option>
+              <option value="sk">Slovak</option>
+              <option value="ca">Catalan</option>
+              <option value="ta">Tamil</option>
+              <option value="te">Telugu</option>
+              <option value="ur">Urdu</option>
+              <option value="km">Khmer</option>
+              <option value="lo">Lao</option>
+              <option value="my">Burmese</option>
+            </select>
+          </label>
+        </div>
+        <div class="model-info" id="modelInfo"></div>
+        <div class="btn-grid">
+          <button class="btn btn-primary" id="transcribeBtn" title="Speech to text · right-click: resume from the playhead">Transcribe</button>
+          <button class="btn" id="diarizeBtn" title="Identify who is speaking">Speakers</button>
+        </div>
+        <details class="disclosure">
+          <summary>Speaker options</summary>
+          <div class="controls">
+            <div class="control">
+              <label class="control-label" for="knownSpeakersInput" title="Skips pyannote's speaker-count search → faster. 0 = auto.">Known speakers</label>
+              <input type="number" id="knownSpeakersInput" min="0" max="20" value="0" step="1" />
+              <span class="control-value">0 = auto</span>
+            </div>
+            <div class="control">
+              <label class="control-label" for="speakerSensitivitySelect">Sensitivity</label>
+              <select id="speakerSensitivitySelect">
+                <option value="standard" selected>Standard — fewer speakers</option>
+                <option value="sensitive">Sensitive — pyannote default</option>
+                <option value="max">Maximum — catch very brief</option>
+              </select>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span class="card-title">Subtitles &amp; speakers</span></div>
+        <div class="control">
+          <label class="control-label" for="subtitleTimingMode">Subtitle timing</label>
+          <select id="subtitleTimingMode">
+            <option value="after" selected>After cut</option>
+            <option value="before">Before cut (original)</option>
+          </select>
+        </div>
+        <div class="btn-grid btn-grid-3">
+          <button class="btn" id="makeSubtitleBtn" title="Create caption tracks on the active sequence">Make subtitle</button>
+          <button class="btn" id="exportSrtBtn" title="Save an .srt file to the export folder">Export SRT</button>
+          <button class="btn" id="labelSpeakerBtn" title="Cut at speaker changes &amp; rename each clip to its speaker">Tag speaker</button>
+        </div>
+        <div class="export-info" id="exportInfo"></div>
+      </div>
+
+      <div class="card card-flush segments" id="segmentsSection">
+        <div class="card-head card-head-pad">
+          <span class="card-title">Segments <span class="card-meta" id="segmentCount">0 found</span></span>
+          <span class="head-actions">
+            <button class="icon-btn" id="searchToggleBtn" title="Search &amp; replace" aria-label="Search">&#8981;</button>
+            <button class="icon-btn" id="segmentSettingsBtn" title="Display settings" aria-label="Display settings">&#9776;</button>
+            <button class="icon-btn" id="textViewToggle" title="Text-only view" aria-label="Text-only view">&para;</button>
+          </span>
+        </div>
+        <div class="popover hidden" id="segmentSettingsPanel">
+          <span class="field-label">Display mode</span>
+          <label class="radio"><input type="radio" name="lineBreakMode" value="natural" checked /><span>Natural sentences</span></label>
+          <label class="radio"><input type="radio" name="lineBreakMode" value="word" /><span>Word by word</span></label>
+          <label class="radio"><input type="radio" name="lineBreakMode" value="punctuation" /><span>By punctuation (.!?,;)</span></label>
+          <label class="radio"><input type="radio" name="lineBreakMode" value="maxWords" /><span>Max words per line</span></label>
+          <div class="control hidden" id="maxWordsRow">
+            <input type="range" id="maxWordsSlider" min="2" max="20" value="5" step="1" />
+            <span class="control-value" id="maxWordsVal">5</span>
+          </div>
+        </div>
+        <div class="filter-bar">
+          <button class="chip active" data-filter="all">All</button>
+          <button class="chip" data-filter="speech">Speech</button>
+          <button class="chip" data-filter="silence">Silence</button>
+          <button class="chip" data-filter="translation">Translation</button>
+        </div>
+        <div class="search-panel hidden" id="searchPanel">
+          <div class="search-row">
+            <input type="text" id="searchInput" placeholder="Search…" />
+            <span class="search-count" id="searchCount"></span>
+            <button class="icon-btn icon-btn-sm" id="searchPrevBtn" title="Previous (Shift+Enter)">&#9650;</button>
+            <button class="icon-btn icon-btn-sm" id="searchNextBtn" title="Next (Enter)">&#9660;</button>
+          </div>
+          <div class="search-row">
+            <input type="text" id="replaceInput" placeholder="Replace with…" />
+            <button class="btn btn-xs" id="replaceOneBtn">Replace</button>
+            <button class="btn btn-xs" id="replaceAllBtn">All</button>
+          </div>
+        </div>
+        <div class="trans-tabs hidden" id="transTabs">
+          <div class="trans-tab-list" id="transTabList"></div>
+          <button class="icon-btn icon-btn-sm" id="transAddBtn" title="Add language">+</button>
+          <span class="spacer"></span>
+          <button class="btn btn-primary btn-xs" id="translateBtn">Translate</button>
+        </div>
+        <div class="lang-picker hidden" id="langPicker"><div class="lang-picker-list" id="langPickerList"></div></div>
+        <div class="segment-list" id="segmentList">
+          <div class="segment-empty">Load audio from the timeline and run Transcribe</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ Beats ═══ -->
+    <section class="tab-panel hidden" id="tab-beats">
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Beats</span>
+          <span class="card-meta" id="beatSummary">No beats yet</span>
+        </div>
+        <button class="btn btn-primary btn-block" id="beatDetectBtn" title="Find the beat grid of the loaded audio (load the music clip)">Detect beats</button>
+        <details class="disclosure">
+          <summary>Tempo options</summary>
+          <div class="controls">
+            <div class="control">
+              <label class="control-label" for="beatBpmInput" title="Leave empty to estimate (tempo may drift); set it for a strict grid">Fixed BPM</label>
+              <input type="number" id="beatBpmInput" min="20" max="400" step="0.1" placeholder="auto" />
+              <span class="control-value">empty = auto</span>
+            </div>
+            <div class="control">
+              <label class="control-label" for="beatMinBpm">BPM range</label>
+              <input type="number" id="beatMinBpm" min="20" max="400" value="60" step="1" />
+              <input type="number" id="beatMaxBpm" min="20" max="400" value="200" step="1" />
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">Markers</span>
+          <span class="card-meta" id="beatCount"></span>
+        </div>
+        <div class="row">
+          <label class="field">
+            <span class="field-label">Place a marker every</span>
+            <select id="beatEvery">
+              <option value="0.25">1/4 beat</option>
+              <option value="0.5">1/2 beat</option>
+              <option value="1" selected>Beat</option>
+              <option value="2">2 beats</option>
+              <option value="bar">Bar</option>
+              <option value="2bar">2 bars</option>
+              <option value="4bar">4 bars</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Meter</span>
+            <select id="beatMeter">
+              <option value="2">2/4</option>
+              <option value="3">3/4</option>
+              <option value="4" selected>4/4</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <div class="field">
+            <span class="field-label" title="Shift which beat counts as the bar's first beat">Downbeat</span>
+            <div class="stepper">
+              <button class="btn btn-xs" id="beatOffsetMinus" title="Earlier">&minus;</button>
+              <span class="stepper-val" id="beatOffsetVal">0</span>
+              <button class="btn btn-xs" id="beatOffsetPlus" title="Later">+</button>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label" title="Fix a beat grid detected at half or double speed">Tempo</span>
+            <div class="stepper">
+              <button class="btn btn-xs" id="beatHalfBtn" title="Half time">÷2</button>
+              <span class="stepper-val" id="beatTempoVal">1×</span>
+              <button class="btn btn-xs" id="beatDoubleBtn" title="Double time">×2</button>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <span class="field-label">Add to</span>
+          <div class="segmented">
+            <label><input type="radio" name="beatTarget" value="sequence" checked /><span>Timeline</span></label>
+            <label id="beatClipLabel"><input type="radio" name="beatTarget" value="clip" /><span>Selected clip</span></label>
+          </div>
+        </div>
+        <div class="row">
+          <label class="field">
+            <span class="field-label">Color</span>
+            <select id="beatColor"></select>
+          </label>
+          <label class="field">
+            <span class="field-label">Downbeats</span>
+            <select id="beatDownColor"></select>
+          </label>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="beatClickCheck" />
+          <span>Click track while playing</span>
+        </label>
+        <p class="hint">Review on the waveform first: click a marker in the strip under the time ruler to exclude it, double-click the strip to add one.</p>
+        <div class="btn-grid">
+          <button class="btn btn-primary" id="beatApplyBtn" disabled>Add markers</button>
+          <button class="btn" id="beatResetBtn" disabled title="Bring back excluded markers and drop added ones">Reset review</button>
+        </div>
+        <button class="btn btn-ghost btn-block" id="beatClearBtn" title="Delete markers EasyScript added (yours are kept)">Remove EasyScript beat markers</button>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Settings -->
+  <div class="modal-overlay hidden" id="settingsOverlay">
+    <div class="modal modal-wide">
+      <div class="modal-head">
+        <span class="modal-title">Settings</span>
+        <button class="icon-btn" id="settingsCloseBtn" title="Close" aria-label="Close">&#10005;</button>
+      </div>
+      <div class="modal-body" id="settingsBody">
+        <div class="settings-group">
+          <div class="settings-title">Export folder</div>
+          <div class="control">
+            <span class="path-text" id="exportDirText">—</span>
+            <button class="btn btn-xs" id="exportDirBtn">Change…</button>
+          </div>
+          <p class="hint">SRT and XML files are saved here.</p>
+        </div>
+
+        <div class="settings-group">
+          <div class="settings-title">Speakers</div>
+          <div class="control">
+            <label class="control-label" for="hfTokenInput">HF token</label>
+            <input type="password" id="hfTokenInput" placeholder="hf_…" />
+          </div>
+          <p class="hint">Required for speaker detection. <a href="https://huggingface.co/settings/tokens" target="_blank">Get a token</a></p>
+        </div>
+
+        <div class="settings-group">
+          <div class="settings-title">Translation</div>
+          <div class="control">
+            <label class="control-label" for="translationProvider">Provider</label>
+            <select id="translationProvider">
+              <option value="nllb">NLLB-200 (Local, fast)</option>
+              <option value="ollama">Ollama (Local)</option>
+              <option value="hymt2">Hy-MT2 (Local)</option>
+              <option value="claude">Claude API (Cloud)</option>
+            </select>
+          </div>
+          <div id="ollamaSettings">
+            <div class="control" id="ollamaUrlRow">
+              <label class="control-label" for="ollamaUrlInput">Ollama URL</label>
+              <input type="text" id="ollamaUrlInput" placeholder="http://localhost:11434" value="http://localhost:11434" />
+            </div>
+            <div class="control" id="ollamaModelRow">
+              <label class="control-label" for="ollamaModelSelect">Model</label>
+              <select id="ollamaModelSelect"><option value="">Loading models…</option></select>
+              <button class="icon-btn icon-btn-sm" id="refreshOllamaModelsBtn" title="Refresh">&#8635;</button>
+            </div>
+          </div>
+          <div id="hymt2Settings" class="hidden">
+            <div class="control">
+              <label class="control-label" for="hymt2ModelSize">Model size</label>
+              <select id="hymt2ModelSize">
+                <option value="1.8B">1.8B — fast (~3GB VRAM)</option>
+                <option value="7B">7B — more accurate (~14GB VRAM)</option>
+              </select>
+            </div>
+            <div class="control" id="hymt2StatusRow">
+              <span class="hint" id="hymt2StatusText">Not downloaded</span>
+              <button class="btn btn-xs" id="hymt2DownloadBtn">Download</button>
+            </div>
+          </div>
+          <div id="nllbSettings" class="hidden">
+            <div class="control">
+              <label class="control-label" for="nllbModelSize">Model size</label>
+              <select id="nllbModelSize">
+                <option value="600M">600M — fast (~2.4GB)</option>
+                <option value="1.3B">1.3B — better quality (~5GB)</option>
+              </select>
+            </div>
+            <div class="control" id="nllbStatusRow">
+              <span class="hint" id="nllbStatusText">Not downloaded</span>
+              <button class="btn btn-xs" id="nllbDownloadBtn">Download</button>
+            </div>
+          </div>
+          <div class="control hidden" id="claudeKeyRow">
+            <label class="control-label" for="claudeApiKeyInput">API key</label>
+            <input type="password" id="claudeApiKeyInput" placeholder="sk-ant-…" />
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-primary btn-block" id="saveSettingsBtn">Save settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Translate dialog -->
+  <div class="modal-overlay hidden" id="translateDialog">
+    <div class="modal">
+      <div class="modal-title">Translate</div>
+      <p class="hint">Languages to translate:</p>
+      <div id="translateDialogLangs"></div>
+      <div class="btn-grid">
+        <button class="btn" id="translateDialogCancel">Cancel</button>
+        <button class="btn btn-primary" id="translateDialogConfirm">Translate</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Make subtitle dialog -->
+  <div class="modal-overlay hidden" id="subtitleDialog">
+    <div class="modal">
+      <div class="modal-title">Make subtitle</div>
+      <p class="hint">Create caption tracks for:</p>
+      <div id="subtitleDialogLangs"></div>
+      <div class="btn-grid">
+        <button class="btn" id="subtitleDialogCancel">Cancel</button>
+        <button class="btn btn-primary" id="subtitleDialogConfirm">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="CSInterface.js"></script>
+  <script src="bridge.js"></script>
+  <script src="waveform.js"></script>
+  <script src="beats.js"></script>
+  <script src="index.js"></script>
+</body>
+</html>
