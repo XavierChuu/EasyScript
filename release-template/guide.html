@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { margin: 22mm 18mm; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; color: #1c1c22; font-size: 12.5px; line-height: 1.55; }
+  h1 { font-size: 26px; margin: 0 0 2px; color: #0e0e13; }
+  .sub { color: #6b7280; font-size: 13px; margin: 0 0 18px; }
+  h2 { font-size: 16px; margin: 24px 0 8px; padding-bottom: 5px; border-bottom: 2px solid #e96b34; color: #0e0e13; }
+  h3 { font-size: 13.5px; margin: 14px 0 4px; color: #b3461f; }
+  p { margin: 5px 0; }
+  ol, ul { margin: 5px 0 8px; padding-left: 20px; }
+  li { margin: 3px 0; }
+  code { background: #f1f1f4; padding: 1px 5px; border-radius: 4px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 11.5px; }
+  .pill { display: inline-block; background: #e96b34; color: #fff; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px; letter-spacing: .4px; }
+  .box { background: #faf7f2; border: 1px solid #ece6db; border-left: 3px solid #e96b34; border-radius: 6px; padding: 9px 12px; margin: 10px 0; }
+  .warn { background: #fff7ed; border-left-color: #d97706; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+  th, td { border: 1px solid #e5e7eb; padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: #f6f3ee; font-size: 11.5px; }
+  .step { font-weight: 700; color: #e96b34; }
+  hr { border: none; border-top: 1px solid #eee; margin: 18px 0; }
+  .foot { color: #9ca3af; font-size: 10.5px; margin-top: 26px; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>EasyScript cho Premiere Pro</h1>
+<p class="sub">Tự động cắt khoảng lặng · phiên âm · phân biệt người nói · tạo phụ đề — trực tiếp trên timeline. <b>Hướng dẫn cài đặt &amp; sử dụng</b></p>
+
+<h2>1. Yêu cầu</h2>
+<ul>
+  <li><b>Adobe Premiere Pro 2022 trở lên</b> (macOS hoặc Windows).</li>
+  <li>Khoảng <b>3&nbsp;GB</b> trống (model phiên âm tải lần đầu cần mạng).</li>
+  <li>Mac Apple Silicon (M1–M5) chạy nhanh nhất; máy Intel/Windows vẫn dùng được.</li>
+</ul>
+
+<h2>2. Cài đặt</h2>
+<p>Trong thư mục bạn nhận được có: <code>EasyScript-Premiere.zxp</code>, thư mục <code>backend/</code>, file cài, và hướng dẫn này.</p>
+
+<h3>macOS</h3>
+<ol>
+  <li><b>Thoát hẳn Premiere</b> (Cmd&nbsp;+&nbsp;Q).</li>
+  <li>Chuột phải vào <code>install-mac.command</code> → <b>Open</b> → <b>Open</b> (lần đầu macOS hỏi xác nhận).</li>
+  <li>Script tự bật chế độ extension, cài panel và backend. Xong thì mở lại Premiere.</li>
+</ol>
+
+<h3>Windows</h3>
+<ol>
+  <li><b>Thoát hẳn Premiere.</b></li>
+  <li>Chuột phải <code>install-win.bat</code> → <b>Run as administrator</b>.</li>
+  <li>Cài xong, mở lại Premiere.</li>
+</ol>
+
+<div class="box">Mở panel: <b>Window → Extensions → EasyScript</b>. Lần đầu mở, panel <b>tự khởi động backend</b> (góc trên hiện <span class="pill">Connecting</span> → <span class="pill">Connected</span>). Nếu model chưa có, lần phiên âm đầu sẽ tải về (cần mạng, chờ vài phút).</div>
+
+<h2>3. Quy trình sử dụng</h2>
+<table>
+  <tr><th>Bước</th><th>Thao tác</th></tr>
+  <tr><td><span class="step">1</span> Chọn nguồn</td><td>Chọn <b>clip</b> trên timeline (hoặc đặt vạch <b>In/Out</b>). Mục <b>Range</b>: <i>Selected Clip</i> / <i>In&nbsp;/&nbsp;Out Points</i> / <i>Entire Timeline</i>.</td></tr>
+  <tr><td><span class="step">2</span> Load Audio</td><td>Bấm <b>Load Audio from Timeline</b> → sóng âm hiện ra (lấy đúng đoạn đang chọn, kể cả clip đã trim / nested sequence).</td></tr>
+  <tr><td><span class="step">3</span> Detect Silence</td><td>Phát hiện các khoảng lặng. Bấm ⚙ cạnh "Waveform" để chỉnh độ nhạy (padding, ngưỡng dB, min silence).</td></tr>
+  <tr><td><span class="step">4</span> Transcribe</td><td>Phiên âm thành văn bản. Chọn <b>Model</b> &amp; <b>Language</b> trong Settings (⚙).</td></tr>
+  <tr><td><span class="step">5</span> Speakers</td><td>Phân biệt người nói (cần HF Token trong Settings — xem mục 4).</td></tr>
+  <tr><td><span class="step">6</span> Apply Cut</td><td>Cắt bỏ khoảng lặng <b>trực tiếp trên timeline</b> (tự dồn clip + giữ liên kết video/audio).</td></tr>
+  <tr><td><span class="step">7</span> Make Subtitle</td><td>Tạo phụ đề trên timeline. Hộp thoại cho chọn <b>bản gốc + các bản dịch</b>. Kiểu xuống dòng theo "Display mode" ở phần Segments.</td></tr>
+  <tr><td><span class="step">8</span> Label Speaker</td><td>Cắt tại chỗ đổi người nói &amp; <b>đổi tên clip</b> theo tên speaker.</td></tr>
+</table>
+
+<h2>4. Cài đặt nâng cao (nút ⚙ Settings)</h2>
+<ul>
+  <li><b>Model / Language</b>: chọn model phiên âm và ngôn ngữ.</li>
+  <li><b>Speakers — HF Token</b>: cần token miễn phí của HuggingFace để phân biệt người nói. Lấy tại <code>huggingface.co/settings/tokens</code> và <b>chấp nhận điều khoản</b> 2 model: <code>pyannote/speaker-diarization-3.1</code> và <code>pyannote/segmentation-3.0</code>.</li>
+  <li><b>Translation</b>: chọn nhà cung cấp dịch (NLLB-200 / Ollama / Hy-MT2 / Claude API). Tải model dịch trong Settings nếu là bản local.</li>
+  <li><b>Subtitle timing</b>: phụ đề theo thời gian <i>sau khi cắt</i> hoặc <i>theo bản gốc</i>.</li>
+</ul>
+
+<h2>5. Xử lý sự cố</h2>
+<table>
+  <tr><th>Hiện tượng</th><th>Cách khắc phục</th></tr>
+  <tr><td>Không thấy "EasyScript" trong Extensions</td><td>Chạy lại file cài, rồi <b>thoát hẳn &amp; mở lại Premiere</b>.</td></tr>
+  <tr><td>Góc panel báo <b>Offline</b> mãi</td><td>Backend chưa chạy. Mở lại panel (panel tự khởi động backend). Lần đầu có thể chờ vài phút tải model.</td></tr>
+  <tr><td>Speakers báo lỗi token</td><td>Nhập HF Token &amp; chấp nhận điều khoản 2 model pyannote (mục 4), bấm Save Settings.</td></tr>
+  <tr><td>Load Audio nested không ra tiếng</td><td>Đảm bảo sequence có audio; thử lại — bản render được chuẩn hóa âm lượng tự động.</td></tr>
+</table>
+
+<div class="box warn"><b>Lưu ý:</b> EasyScript không sửa file gốc của bạn. Mọi thao tác cắt/đổi tên đều áp lên clip trên timeline; bạn có thể Undo (Cmd/Ctrl&nbsp;+&nbsp;Z) bất cứ lúc nào.</div>
+
+<p class="foot">EasyScript for Premiere Pro — Hướng dẫn người dùng. © EasyScript. Mọi quyền được bảo lưu.</p>
+
+</body>
+</html>

@@ -1,279 +1,109 @@
 # EasyScript
 
-**Standalone desktop transcription & translation app** powered by Whisper AI. Transcribe audio/video files or live microphone input with real-time sentence splitting, speaker diarization, and multilingual translation.
-
-Built for macOS (Apple Silicon optimized with Metal GPU acceleration) and Windows (CUDA support).
-
----
-
-## Screenshots
-
-> **v1.2.0** — Redesigned interface (Vapi midnight console), auto-waveform on file select, and song-mode tuning sliders.
-
-### Editor Mode — Main Interface
-Pick an audio/video file and you're ready to go: action buttons (Detect Silence · Transcribe · Speakers), model + language pickers, an interactive waveform, segments list, and export controls — all in a single compact panel. CUDA / device status is shown next to the model tag.
-
-![Editor Mode Overview](docs/images/01-editor-overview.png)
-
-### Waveform & Cut Detection
-After loading an audio file the waveform appears immediately, so Transcribe or Speakers can run **without** clicking Detect Silence first. Open the cut-settings panel to fine-tune padding, minimum silence and silence threshold; preview the resulting cuts on the waveform with the SPEECH / SILENCE / BREATH / CUT legend.
-
-![Waveform & Cut Detection](docs/images/02-editor-waveform-cuts.png)
-
-### Music / Song — Tunable Lyric Recognition
-Choosing **Music / Song** in the transcribe dialog reveals three sliders that let you steer how Whisper handles isolated vocals:
-
-- **Vocal sensitivity** — lower catches whispered / falsetto vocals, higher rejects background music
-- **Phrase gap** — minimum silence (ms) between lyric phrases
-- **Decode quality** — beam search width 1 → 5 (slower but more coherent lyrics)
-
-Vocals are first isolated with Demucs, then Whisper transcribes the clean vocal track with your chosen settings.
-
-![Music / Song tuning sliders](docs/images/03-song-mode-tuning.png)
-
-### Segments with Speaker Labels & Bilingual Text
-Each segment shows a colored speaker pill (Speaker A, B, C…), a monospace timecode, the original line, and the translation below. Click a segment to jump the playhead; click the speaker pill to rename them.
-
-![Segments with Speaker Labels](docs/images/04-segments-speaker-labels.png)
-
-### Translation — Language Picker
-Add a target language from a flat grid covering 40+ languages. The source language and already-added languages are dimmed. Languages stick as pill-tabs, switchable in one click.
-
-![Translation Languages](docs/images/05-translation-languages.png)
-
-### Translation — Multi-language Bilingual View
-Run multiple translations in parallel (Vietnamese, Chinese, Japanese, …) and switch between them with pill-tabs. Each segment shows the original line in italic above the translation, with the speaker label still attached.
-
-![Translation Bilingual View](docs/images/06-translation-bilingual.png)
-
-### Live Mode — Real-time Transcription
-Record from microphone or system audio and watch lines appear as you speak. The currently-streaming partial line is highlighted in cyan with a `● live` tag; finalized segments stack below with timecodes. Pause / Stop control the session without losing what's already been captured.
-
-![Live Mode](docs/images/07-live-mode.png)
+**Premiere Pro panel for silence cutting, transcription, translation and beat markers**, backed by a local Python server (Whisper, pyannote, numpy beat tracker). Everything runs on your machine — macOS (Apple Silicon / Metal) and Windows (NVIDIA CUDA or CPU).
 
 ---
 
 ## Features
 
-### Editor Mode — File-based Transcription
-- **Audio/Video file support** — Load any audio or video file for analysis
-- **Silence & breath detection** — Detect silent and breath segments using FFmpeg-based VAD
-- **AI Transcription** — Speech-to-text using Whisper (MLX on Apple Silicon, faster-whisper on CUDA/CPU)
-- **Speaker diarization** — Identify who speaks when using pyannote-audio 4.0
-- **Interactive waveform** — Zoomable waveform viewer with playback, cut markers, and segment navigation
-- **Search & Replace** — Find and replace text across all segments
-- **Multiple display modes** — Natural sentences, word-by-word, punctuation-based, or max-words-per-line
-- **Translation** — Translate segments using Ollama (local) or Claude API (cloud)
-- **Export** — Export to XML (Premiere Pro timeline), SRT subtitles (original or after cuts)
+### Cut
+- **Silence & breath detection** on the selected clip or the whole sequence, with padding / min-silence / threshold controls and a live preview on the waveform
+- **Apply Cut** directly on the timeline (frame-exact: cuts are snapped inward to the sequence's frame grid, so they never reach into speech)
+- **Export XML cut** — rebuilds the sequence as an FCP XML in one pass (much faster than razor-by-razor on hour-long timelines), optionally imported straight back into the project
+- **Split speakers** onto separate tracks after diarization
 
-### Live Mode — Real-time Transcription
-- **Microphone input** — Record and transcribe from any connected microphone
-- **System Audio** — Capture browser tab audio (browser mode only)
-- **Real-time sentence splitting** — Sentences split at punctuation marks (`.!?;,`) as you speak
-- **Live translation** — Each sentence is translated immediately after finalization
-- **Speech / Translation tabs** — Speech tab shows fast real-time transcription; Translation tab holds position until translation completes for reading comfort
-- **Pause / Continue / Stop** — Full session control with data preservation
-- **Non-blocking pipeline** — Heavy Whisper inference runs asynchronously, never blocking audio capture
+### Transcript
+- **Whisper transcription** — mlx-whisper on Apple Silicon, faster-whisper on CUDA/CPU; models from Tiny to Large V3 / Turbo
+- **Music / Song mode** — Demucs vocal isolation + tunable vocal sensitivity, phrase gap and decode quality
+- **Speaker diarization** (pyannote; needs a HuggingFace token)
+- **Translation** — local (NLLB / Ollama) or Claude API, multiple target languages side by side
+- **Search & replace**, display modes (sentence / word / punctuation / max words per line)
+- **Captions** — export SRT (original or after cuts) and create a Premiere captions track
 
-### Transcription Models
-| Model | Size | Speed | Quality |
-|-------|------|-------|---------|
-| Tiny | ~75MB | Fastest | Basic |
-| Base | ~140MB | Fast | Good |
-| Small | ~460MB | Medium | Better |
-| Medium | ~1.5GB | Slow | Great |
-| **Turbo** | **~800MB** | **Fast** | **Best for Vietnamese** |
-| Large V3 | ~3GB | Slowest | Best overall |
+### Beats
+- Beat / downbeat detection with auto or fixed BPM, tempo range and tightness
+- Marker spacing from 1/4 beat up to 4 bars, with meter, downbeat offset and half/double tempo — reviewed on the waveform before applying
+- Markers placed on the **selected clip** or on the **sequence timeline**; clear them again in one click
 
-### GPU Acceleration
-- **Apple Silicon** (M1/M2/M3/M4) — MLX backend with Metal GPU, optimized for macOS
-- **NVIDIA GPU** — faster-whisper with CUDA acceleration
-- **CPU fallback** — Automatic fallback when no GPU available
+### Waveform
+- Canvas renderer with multi-resolution peaks — smooth zoom from a full 3-hour overview down to individual samples
+- Speaker colours, cut regions, beat markers; click to seek Premiere's playhead
 
 ---
 
-## Installation
+## Install
 
-### Option 1: Download Standalone App (Recommended)
+1. Install the panel: double-click `EasyScript-Premiere.zxp` with a ZXP installer (e.g. ZXPInstaller / Anastasiy's Extension Manager).
+2. Copy the backend into `~/.easyscript/backend` (the release bundle's installer does this). The panel starts it automatically.
+3. Open Premiere Pro → **Window → Extensions → EasyScript**.
 
-Download `EasyScript.app` from [Releases](https://github.com/XavierChuu/EasyScript/releases) and drag to Applications.
-
-### Option 2: Build from Source
-
-**Requirements:**
-- Python 3.11+
-- macOS 13+ (for Apple Silicon MLX) or Windows with NVIDIA GPU
-- FFmpeg is **bundled** in the .app (no installation needed for end users)
-- For source build: build script auto-downloads static ffmpeg/ffprobe
-
-```bash
-# Clone repository
-git clone https://github.com/XavierChuu/EasyScript.git
-cd EasyScript
-
-# Build standalone app
-chmod +x scripts/build_app.sh
-./scripts/build_app.sh
-
-# App will be at dist/EasyScript.app (macOS)
-open dist/EasyScript.app
-```
-
-### Option 3: Development Mode
-
-```bash
-# Setup backend
-cd backend
-python3.11 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Start backend server
-python server.py
-# Server runs at http://localhost:9876
-
-# In another terminal, serve frontend
-npx serve ./plugin
-# Open http://localhost:3000 in browser
-```
+Requirements: Premiere Pro 22+ (CEP 9+), macOS 13+ or Windows 10+, 8 GB RAM (16 GB for large models). FFmpeg is bundled.
 
 ---
 
-## Usage Guide
-
-### Editor Mode
-
-#### 1. Load Audio
-- Click the **folder icon** next to the audio path field
-- Select any audio or video file (MP3, WAV, M4A, MP4, MOV, etc.)
-- Audio info (duration, sample rate, channels) will be displayed
-
-#### 2. Detect Silence
-- Click **"Detect Silence"** to analyze the audio
-- The waveform will show speech (blue), silence (gray), and breath (orange) segments
-- Adjust cut settings (padding, min silence, threshold) via the gear icon on the waveform
-
-#### 3. Transcribe
-- Select your preferred **Model** (Turbo recommended for Vietnamese)
-- Select **Language** (or leave as Auto-detect)
-- Optionally check **"Identify speakers after transcribe"**
-- Click **"Transcribe"** — progress bar shows real-time status with ETA
-- Right-click to resume transcription from the current playhead position
-
-#### 4. Speaker Diarization
-- Requires a **HuggingFace token** (configure in Settings)
-- Accept terms at [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
-- Click **"Speakers"** to identify who speaks when
-- Speakers are labeled as Speaker A, Speaker B, etc.
-
-#### 5. Translate
-- Switch to the **Translation** tab in segments
-- Click **"+"** to add a target language
-- Click **"Translate"** to translate all segments
-- Supports Ollama (local, free) or Claude API (cloud, higher quality)
-
-#### 6. Export
-- **Export XML** — Premiere Pro compatible timeline with cuts applied
-- **Export SRT (Original)** — Subtitles with original timecodes
-- **Export SRT (After Cuts)** — Subtitles adjusted for silence removal
-- Choose output folder via the folder selector
-
-### Live Mode
-
-#### 1. Select Input Source
-- **Microphone** — Select from available microphones
-- **System Audio** — Capture browser tab audio (only works in browser mode, not in bundled app)
-
-#### 2. Configure
-- Select transcription **Model** (Turbo recommended)
-- Select **Language**
-- Optionally enable **Translation** with target language
-
-#### 3. Start Recording
-- Click **"Start Live"** to begin real-time transcription
-- Speech is transcribed and split into sentences in real-time
-- Switch between **Speech** and **Translation** tabs:
-  - **Speech tab** — Shows transcription as fast as possible
-  - **Translation tab** — Holds position until translation for current sentence is ready
-
-#### 4. Session Controls
-- **Pause** — Temporarily stop recording, stay in focus mode
-- **Continue** — Resume recording without clearing data
-- **Stop** — End session, return to full UI with all data preserved for export
-- **New** — Start a fresh session (clears previous data)
-
----
-
-## Settings
-
-### HuggingFace Token
-Required for speaker diarization. Get your token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
-
-### Translation Provider
-- **Ollama (Local)** — Free, runs locally. Install [Ollama](https://ollama.ai) and pull a model
-- **Claude API (Cloud)** — Higher quality translations. Requires an [Anthropic API key](https://console.anthropic.com)
-
----
-
-## Architecture
+## Development
 
 ```
 EasyScript/
-├── plugin/                 # Frontend (HTML/CSS/JS)
-│   ├── index.html          # Main UI layout
-│   ├── index.js            # App logic, WebSocket handling
-│   └── styles.css          # Styling
-├── backend/                # Python backend
-│   ├── server.py           # FastAPI server + WebSocket live streaming
-│   ├── transcriber.py      # Whisper transcription (MLX / faster-whisper)
-│   ├── silence_detector.py # FFmpeg-based silence/breath detection
-│   ├── diarizer.py         # Speaker diarization (pyannote-audio)
-│   ├── translator.py       # Translation (Ollama / Claude API)
-│   ├── main.py             # PyWebView launcher
-│   ├── easyscript.spec     # PyInstaller build spec
-│   └── requirements.txt    # Python dependencies
+├── cep-extension-v2.1/     # Premiere panel (CEP)
+│   ├── index.html / index.js / styles.css
+│   ├── waveform.js         # canvas waveform
+│   ├── beats.js            # beat-marker UI
+│   ├── bridge.js           # promise wrapper over evalScript
+│   ├── host.jsx            # ExtendScript (ES3, JSON polyfilled)
+│   └── package_zxp.*       # sign → dist/EasyScript-Premiere.zxp
+├── backend/                # FastAPI server (localhost:9876)
+│   ├── server.py           # API
+│   ├── security.py         # per-launch access token, Host/CORS checks
+│   ├── transcriber.py / diarizer.py / translator.py / silence_detector.py
+│   ├── waveform.py         # multi-resolution peaks
+│   ├── beat_tracker.py     # numpy beat tracker
+│   ├── xml_cut.py          # FCP7 XML sequence cutter
+│   ├── backend_main.py     # PyInstaller entry
+│   ├── easyscript_backend.spec
+│   └── tests/
 ├── scripts/
-│   └── build_app.sh        # Build standalone app script
-└── README.md
+│   ├── build_backend_win.ps1   # Windows backend build (venv: backend/venv-win)
+│   ├── build_backend_mac.sh    # macOS backend build (venv: backend/venv)
+│   └── make_release.sh         # assemble the release bundle
+└── release-template/       # installer files copied into each release
 ```
 
-### Tech Stack
-- **Frontend:** HTML/CSS/JS (runs in browser or PyWebView)
-- **Backend:** Python 3.11, FastAPI, uvicorn
-- **Transcription:** mlx-whisper (Apple Silicon Metal GPU) / faster-whisper (CUDA/CPU)
-- **Speaker ID:** pyannote-audio 4.0 + torchcodec
-- **Live mode:** WebSocket streaming, webrtcvad sentence splitting
-- **Translation:** Ollama (local) / Claude API (cloud)
-- **Distribution:** PyInstaller bundled .app
+### Run the backend
 
----
+```bash
+cd backend
+python -m venv venv && venv/bin/pip install -r requirements.txt
+EASYSCRIPT_TOKEN=dev venv/bin/python server.py
+```
 
-## API Endpoints
+Every request needs the access token (header `X-EasyScript-Token`, or `?token=` for `<audio>` / WebSocket); only `/health` is open. The panel reads it from `~/.easyscript/token-<port>`. `EASYSCRIPT_TOKEN` pins it for development.
 
-The backend exposes a REST API at `http://localhost:9876`:
+### Panel without Premiere
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/health` | Server health check + GPU info |
-| POST | `/upload` | Upload audio/video file |
-| POST | `/analyze` | Detect silence/breath segments |
-| POST | `/transcribe` | Transcribe audio to text |
-| POST | `/diarize` | Speaker diarization |
-| POST | `/translate` | Batch translate segments |
-| POST | `/translate/one` | Translate single segment |
-| GET | `/models` | List available models |
-| GET | `/model/status` | Check if model is cached |
-| WebSocket | `/ws/live` | Live transcription stream |
+Serve `cep-extension-v2.1/` and open `index.html?token=dev` (add `&port=…` for another backend port), or run `start_dev.command` on macOS. Premiere-only actions are disabled in the browser.
 
----
+### Panel inside Premiere (dev)
 
-## System Requirements
+Run `cep-extension-v2.1/install.bat` (Windows) or `install.sh` (macOS). It enables PlayerDebugMode and copies the panel into the CEP extensions directory; the debugger is at http://localhost:8088.
 
-- **macOS:** 13.0+ (Ventura or later), Apple Silicon recommended
-- **Windows:** Windows 10+, NVIDIA GPU recommended
-- **RAM:** 8GB minimum, 16GB recommended for large models
-- **Storage:** ~1.1GB for app + model storage (varies by model size)
-- **FFmpeg:** Bundled inside the standalone app — no separate install needed
+### Build
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_backend_win.ps1
+```
+
+```bash
+./scripts/build_backend_mac.sh
+```
+
+Output: `backend/dist_backend/EasyScript-backend/`. Package the panel with `cep-extension-v2.1/package_zxp.ps1 -ZxpSign <ZXPSignCmd.exe>` (or `package_zxp.sh`). The signing certificate and ZXPSignCmd stay out of git.
+
+### Tests
+
+```bash
+python -m unittest discover -s backend/tests -t backend
+```
 
 ---
 

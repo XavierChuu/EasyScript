@@ -46,3 +46,8 @@ settings.json
 ZXPSignCmd
 ZXPSignCmd.exe
 *.zxp
+
+# Windows build venv and PyInstaller output
+backend/venv-win/
+backend/build_backend/
+backend/dist_backend/

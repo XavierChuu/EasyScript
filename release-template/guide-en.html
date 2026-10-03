@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { margin: 22mm 18mm; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; color: #1c1c22; font-size: 12.5px; line-height: 1.55; }
+  h1 { font-size: 26px; margin: 0 0 2px; color: #0e0e13; }
+  .sub { color: #6b7280; font-size: 13px; margin: 0 0 18px; }
+  h2 { font-size: 16px; margin: 24px 0 8px; padding-bottom: 5px; border-bottom: 2px solid #e96b34; color: #0e0e13; }
+  h3 { font-size: 13.5px; margin: 14px 0 4px; color: #b3461f; }
+  p { margin: 5px 0; }
+  ol, ul { margin: 5px 0 8px; padding-left: 20px; }
+  li { margin: 3px 0; }
+  code { background: #f1f1f4; padding: 1px 5px; border-radius: 4px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 11.5px; }
+  .pill { display: inline-block; background: #e96b34; color: #fff; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px; letter-spacing: .4px; }
+  .box { background: #faf7f2; border: 1px solid #ece6db; border-left: 3px solid #e96b34; border-radius: 6px; padding: 9px 12px; margin: 10px 0; }
+  .warn { background: #fff7ed; border-left-color: #d97706; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+  th, td { border: 1px solid #e5e7eb; padding: 6px 9px; text-align: left; vertical-align: top; }
+  th { background: #f6f3ee; font-size: 11.5px; }
+  .step { font-weight: 700; color: #e96b34; }
+  .foot { color: #9ca3af; font-size: 10.5px; margin-top: 26px; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>EasyScript for Premiere Pro</h1>
+<p class="sub">Auto silence-cut · transcription · speaker labeling · subtitles — directly on your timeline. <b>Installation &amp; User Guide</b></p>
+
+<h2>1. Requirements</h2>
+<ul>
+  <li><b>Adobe Premiere Pro 2022 or newer</b> (macOS or Windows).</li>
+  <li>About <b>3&nbsp;GB</b> free disk space (the transcription model downloads on first use — needs internet).</li>
+  <li>Apple Silicon Macs (M1–M5) are fastest; Intel/Windows machines also work.</li>
+</ul>
+
+<h2>2. Installation</h2>
+<p>Your package contains: <code>EasyScript-Premiere.zxp</code>, a <code>backend/</code> folder, the installers, and this guide.</p>
+
+<h3>macOS</h3>
+<ol>
+  <li><b>Fully quit Premiere</b> (Cmd&nbsp;+&nbsp;Q).</li>
+  <li>Right-click <code>install-mac.command</code> → <b>Open</b> → <b>Open</b> (macOS asks once on first run).</li>
+  <li>The script installs the panel and the backend automatically. Reopen Premiere when it finishes.</li>
+</ol>
+
+<h3>Windows</h3>
+<ol>
+  <li><b>Fully quit Premiere.</b></li>
+  <li>Right-click <code>install-win.bat</code> → <b>Run as administrator</b>.</li>
+  <li>Reopen Premiere when it finishes.</li>
+</ol>
+
+<div class="box">Open the panel: <b>Window → Extensions → EasyScript</b>. On first open the panel <b>starts the backend automatically</b> (top corner shows <span class="pill">Connecting</span> → <span class="pill">Connected</span>). The first transcription downloads the model (needs internet, a few minutes).</div>
+
+<h2>3. Workflow</h2>
+<table>
+  <tr><th>Step</th><th>Action</th></tr>
+  <tr><td><span class="step">1</span> Pick a source</td><td>Select a <b>clip</b> on the timeline (or set <b>In/Out</b> marks). <b>Range</b>: <i>Selected Clip</i> / <i>In&nbsp;/&nbsp;Out Points</i> / <i>Entire Timeline</i>.</td></tr>
+  <tr><td><span class="step">2</span> Load Audio</td><td>Click <b>Load Audio from Timeline</b> → the waveform appears (exactly the selected part, including trimmed clips and nested sequences).</td></tr>
+  <tr><td><span class="step">3</span> Detect Silence</td><td>Finds silent gaps. Click the ⚙ next to "Waveform" to tune sensitivity (padding, dB threshold, min silence).</td></tr>
+  <tr><td><span class="step">4</span> Transcribe</td><td>Speech to text. Pick the <b>Model</b> &amp; <b>Language</b> in Settings (⚙).</td></tr>
+  <tr><td><span class="step">5</span> Speakers</td><td>Identify who is speaking (needs an HF Token in Settings — see section 4).</td></tr>
+  <tr><td><span class="step">6</span> Apply Cut</td><td>Removes silence <b>directly on the timeline</b> (ripples clips closed and keeps audio/video in sync).</td></tr>
+  <tr><td><span class="step">7</span> Make Subtitle</td><td>Creates subtitles on the timeline. A dialog lets you pick the <b>original + any translations</b>. Line breaks follow the "Display mode" in Segments.</td></tr>
+  <tr><td><span class="step">8</span> Label Speaker</td><td>Cuts at speaker changes &amp; <b>renames each clip</b> to its speaker name.</td></tr>
+</table>
+
+<h2>4. Settings (⚙ button)</h2>
+<ul>
+  <li><b>Model / Language</b>: choose the transcription model and language.</li>
+  <li><b>Speakers — HF Token</b>: a free HuggingFace token is required for speaker identification. Get one at <code>huggingface.co/settings/tokens</code> and <b>accept the terms</b> of both models: <code>pyannote/speaker-diarization-3.1</code> and <code>pyannote/segmentation-3.0</code>.</li>
+  <li><b>Translation</b>: choose a translation provider (NLLB-200 / Ollama / Hy-MT2 / Claude API). Download the local model in Settings if using a local provider.</li>
+  <li><b>Subtitle timing</b>: subtitles timed <i>after the cut</i> or <i>to the original</i>.</li>
+</ul>
+
+<h2>5. Troubleshooting</h2>
+<table>
+  <tr><th>Symptom</th><th>Fix</th></tr>
+  <tr><td>"EasyScript" not in Extensions</td><td>Run the installer again, then <b>fully quit &amp; reopen Premiere</b>.</td></tr>
+  <tr><td>Panel stays <b>Offline</b></td><td>The backend isn't up. Reopen the panel (it auto-starts the backend). The first run may take a few minutes to download the model.</td></tr>
+  <tr><td>Speakers shows a token error</td><td>Enter your HF Token &amp; accept the two pyannote model terms (section 4), then Save Settings.</td></tr>
+  <tr><td>Nested audio sounds empty</td><td>Make sure the sequence has audio; try again — the render is auto-normalized.</td></tr>
+</table>
+
+<div class="box warn"><b>Note:</b> EasyScript never modifies your source files. All cuts/renames apply to clips on the timeline — you can Undo (Cmd/Ctrl&nbsp;+&nbsp;Z) at any time.</div>
+
+<p class="foot">EasyScript for Premiere Pro — User Guide. © EasyScript. All rights reserved.</p>
+
+</body>
+</html>

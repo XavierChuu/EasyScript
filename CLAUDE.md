@@ -1,36 +1,44 @@
-# EasyScript — Transcription & Translation App
+# EasyScript — Premiere Pro panel: silence cut, transcription, translation, beat markers
 
 ## Architecture
-- **plugin/** — Frontend (HTML/CSS/JS), runs in browser (dev) or Premiere Pro (UXP)
-- **backend/** — Python FastAPI server, bundled via PyInstaller
-- Frontend gọi backend qua `localhost:9876`
+- **cep-extension-v2.1/** — the Premiere panel (CEP). `index.html/js`, `styles.css`,
+  `waveform.js` (canvas waveform), `beats.js` (beat markers), `bridge.js`
+  (promise wrapper over `evalScript`), `host.jsx` (ExtendScript — ES3: no
+  let/const/arrows; JSON is polyfilled).
+- **backend/** — Python FastAPI server on `localhost:9876`, bundled with
+  PyInstaller (`easyscript_backend.spec`, entry `backend_main.py`); the panel
+  launches it from `~/.easyscript/backend`.
+- Premiere edits go through `host.jsx`; analysis (silence, Whisper, pyannote,
+  translation, beats, waveform peaks, XML cut) goes to the backend over fetch.
+- UXP is not used: its Premiere API still has no razor/split.
 
 ## Tech Stack
-- Frontend: HTML/CSS/JS, Premiere DOM API (manifest v6, Premiere 25.0+)
-- Backend: Python 3.11, FastAPI, mlx-whisper/faster-whisper, webrtcvad, websockets
-- Live mode: WebSocket streaming, VAD-based sentence splitting, realtime translation
-- Distribution: PyInstaller bundled executable
+- Panel: HTML/CSS/JS in CEP (CSXS 9+, Premiere 22+), ExtendScript + QE DOM
+- Backend: Python 3.10/3.11, FastAPI, faster-whisper / mlx-whisper, pyannote,
+  numpy beat tracker, FCP7-XML cutter
+- Distribution: signed .zxp + PyInstaller backend, assembled by `scripts/make_release.sh`
 
 ## Commands
-- Build backend: `./scripts/build_backend.sh`
+- Build backend: `scripts/build_backend_win.ps1` (Windows, venv `backend/venv-win`) /
+  `scripts/build_backend_mac.sh` (macOS, venv `backend/venv`) → `backend/dist_backend/`
+- Package panel: `cep-extension-v2.1/package_zxp.ps1 -ZxpSign <ZXPSignCmd.exe>` /
+  `package_zxp.sh` → `dist/EasyScript-Premiere.zxp`
+- Dev install of the panel: `cep-extension-v2.1/install.bat` / `install.sh`
+  (enables PlayerDebugMode; debugger on http://localhost:8088)
 - Run dev server: `cd backend && python server.py`
-- Run dev frontend: `npx serve ./plugin`
-- Load plugin: UXP Developer Tool → Add Plugin → select `plugin/manifest.json`
+- Panel in a browser (no Premiere): `start_dev.command`, or serve
+  `cep-extension-v2.1/` and open `index.html?token=dev` with the backend
+  started as `EASYSCRIPT_TOKEN=dev` (add `&port=…` for another port)
 - Backend tests: `python -m unittest discover -s backend/tests -t backend`
-- Premiere panel (current): `cep-extension-v2.1/` (CEP + ExtendScript `host.jsx`)
 
 ## Backend access token
 - Every request needs the per-launch token (`backend/security.py`): header
   `X-EasyScript-Token`, or `?token=` for `<audio src>` / WebSocket. Only `/health` is open.
-- The panel reads it from `~/.easyscript/token-<port>` via ExtendScript; the
-  standalone app gets it injected by `main.py`.
-- Browser dev of the CEP panel: run the backend with `EASYSCRIPT_TOKEN=dev`
-  (optionally `PORT=9877`) and open `index.html?token=dev&port=9877`.
-  `EASYSCRIPT_AUTH=off` disables the check — never ship that.
+- The panel reads it from `~/.easyscript/token-<port>` via ExtendScript.
+- `EASYSCRIPT_TOKEN` pins the token (dev); `EASYSCRIPT_AUTH=off` disables the
+  check — never ship that.
 
-## Phase Roadmap
-1. Audio analysis backend (faster-whisper + silence detection)
-2. Review UI in Premiere (waveform viewer, cut controls, markers)
-3. Subtitle engine (SRT, Captions track, song ngữ Việt-Anh)
-4. Translation engine (Ollama local + Claude API cloud)
-5. Live transcription (WebSocket streaming, VAD, realtime translation) — **current**
+## Frame math
+- Always use the sequence's ticks-per-frame (`seq.timebase`; 254016000000
+  ticks/s). Cut ranges are snapped inward (start up, end down) so a cut never
+  reaches into speech. Never round fps (29.97 ≠ 30).

@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for EasyScript standalone desktop app.
-Bundles: FastAPI backend + pywebview + frontend (plugin/) + ML libs.
+PyInstaller spec for the EasyScript backend used by the Premiere panel.
+Bundles: headless FastAPI backend (backend_main.py) + ML libs + ffmpeg.
 """
 import os
 import sys
@@ -156,14 +156,6 @@ if platform.system() == "Windows":
             _seen_dll.add(_name)
             nvidia_binaries.append((_dll, "."))
 
-# Frontend files (plugin/)
-plugin_dir = os.path.join(os.path.dirname(os.path.abspath(SPEC)), "..", "plugin")
-plugin_files = []
-for f in ["index.html", "index.js", "styles.css"]:
-    src = os.path.join(plugin_dir, f)
-    if os.path.isfile(src):
-        plugin_files.append((src, "plugin"))
-
 # Bundled ffmpeg/ffprobe binaries (so users don't need to install separately)
 ffmpeg_binaries = []
 _bin_dir = os.path.join(os.path.dirname(os.path.abspath(SPEC)), "bin")
@@ -193,7 +185,7 @@ a = Analysis(
     ["backend_main.py"],
     pathex=[],
     binaries=mlx_binaries + torchcodec_binaries + ffmpeg_binaries + nvidia_binaries,
-    datas=faster_whisper_data + ctranslate2_data + scipy_data + pyannote_data + speechbrain_data + torchcodec_data + mlx_data + demucs_data + transformers_data + package_metadata + plugin_files + ffmpeg_data + soundfile_data + lightning_data + collect_data_files("torchmetrics", include_py_files=True) + [
+    datas=faster_whisper_data + ctranslate2_data + scipy_data + pyannote_data + speechbrain_data + torchcodec_data + mlx_data + demucs_data + transformers_data + package_metadata + ffmpeg_data + soundfile_data + lightning_data + collect_data_files("torchmetrics", include_py_files=True) + [
         ("server.py", "."),
         ("transcriber.py", "."),
         ("silence_detector.py", "."),
@@ -241,10 +233,6 @@ a = Analysis(
         "requests",
         "urllib3",
         "charset_normalizer",
-        # pywebview
-        "webview",
-        "bottle",
-        "proxy_tools",
         # pyannote / torch (diarization)
         "torch",
         "torchaudio",
