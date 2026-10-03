@@ -38,6 +38,23 @@
 - `EASYSCRIPT_TOKEN` pins the token (dev); `EASYSCRIPT_AUTH=off` disables the
   check — never ship that.
 
+## Models
+- ASR: faster-whisper 1.2 (CUDA/CPU) / mlx-whisper; default `large-v3-turbo`
+  (FLEURS-vi long-form: 11 % WER at ~50x real time on an RTX 3060, same as
+  large-v3 at 18x; PhoWhisper and batched mode were worse). Long files are cut
+  into ~10 min chunks at the quietest point (`Transcriber._chunk_bounds`),
+  fed as arrays from the shared PCM cache. Segments keep word timestamps.
+- Speakers: pyannote.audio 4 + community-1 (CC-BY-4.0, ungated mirror
+  `pyannote-community/...`), bundled from `backend/models/` (fetched by the
+  build scripts, gitignored). Its embedding ResNet runs as ONNX
+  (`tools/export_embedding_onnx.py`) on ONNX Runtime DirectML / CPU — Windows
+  ships `onnxruntime-directml` instead of `onnxruntime`.
+- `speakers.py`: word-level attribution on the exclusive diarization, splits
+  lines at real speaker changes. `voices.py`: saved voices
+  (`~/.easyscript/voices.json`) matched by cosine ≥ 0.5.
+- Tag speaker "New sequence" = `/xml/cut` with `splits_ticks` + `labels`
+  (+ `only_media` so music / B-roll aren't split).
+
 ## Frame math
 - Always use the sequence's ticks-per-frame (`seq.timebase`; 254016000000
   ticks/s). Cut ranges are snapped inward (start up, end down) so a cut never

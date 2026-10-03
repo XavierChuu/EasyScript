@@ -3,7 +3,12 @@ import platform
 import os
 import sys
 
-from ffmpeg_utils import run_silent, run_ffmpeg
+import numpy as np
+
+from ffmpeg_utils import run_silent
+
+# Decoded 16 kHz mono PCM cache shared with the waveform endpoints.
+DEFAULT_PCM_CACHE = os.path.join(tempfile.gettempdir(), "easyscript_uploads", "_waveform")
 
 # Add NVIDIA CUDA/cuDNN DLL directories on Windows so faster-whisper can
 # load cublas64_12.dll / cudnn_*.dll. We search two places:
@@ -46,6 +51,9 @@ if platform.system() == "Windows":
                     os.add_dll_directory(str(bin_dir))
                 except Exception:
                     pass
+                # CTranslate2 loads cuBLAS lazily with plain LoadLibrary, which
+                # ignores add_dll_directory and only searches PATH.
+                os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
 
     _add_nvidia_dll_paths()
 
@@ -74,7 +82,7 @@ FW_MODEL_REPOS = {
 # Approximate model sizes for download progress
 MODEL_SIZES = {
     "tiny": "~75MB", "base": "~140MB", "small": "~460MB",
-    "medium": "~1.5GB", "large-v3-turbo": "~800MB", "large-v3": "~3GB",
+    "medium": "~1.5GB", "large-v3-turbo": "~1.6GB", "large-v3": "~3GB",
 }
 
 
@@ -154,8 +162,7 @@ def _is_hallucination(text):
 
 
 class Transcriber:
-    CHUNK_DURATION = 600  # 10 minutes per chunk
-    OVERLAP = 5.0  # 5s overlap to avoid cutting words at boundaries
+    CHUNK_DURATION = 600  # 10 minutes per chunk (boundaries snap to silence)
 
     def __init__(self, model_size="large-v3", device="auto"):
         self.model_size = model_size
@@ -223,126 +230,87 @@ class Transcriber:
 
     def transcribe(self, audio_path, language=None, on_progress=None,
                    start_from=0.0, on_chunk_done=None, song_mode=False,
-                   song_vad_threshold=None, song_min_silence_ms=None, song_beam_size=None):
-        """Transcribe audio with chunked processing for long files."""
+                   song_vad_threshold=None, song_min_silence_ms=None, song_beam_size=None,
+                   vocabulary=None, cache_dir=None):
+        """Transcribe audio, long files in ~10 min chunks cut at silence.
+
+        Audio is decoded once (shared PCM cache) and fed to the model as
+        arrays. Chunk boundaries sit at the quietest point near each 10 min
+        mark, so no word is split and nothing has to be de-duplicated.
+        `vocabulary`: names / terms to bias recognition towards.
+        """
+        import soundfile as sf
+        import waveform
+
         song_opts = {
             "vad_threshold": song_vad_threshold,
             "min_silence_ms": song_min_silence_ms,
             "beam_size": song_beam_size,
         }
-        duration = self._get_duration(audio_path) or 0
+        pcm, sr = waveform.pcm_source(audio_path, cache_dir or DEFAULT_PCM_CACHE)
+        duration = sf.info(pcm).frames / float(sr)
         if duration <= 0:
             if on_progress:
                 on_progress(1.0)
             return []
 
-        start_from = max(0, min(start_from, duration - 1))
-        remaining = duration - start_from
-
-        # Short files: process in one go
-        if remaining <= self.CHUNK_DURATION:
-            if start_from > 0:
-                return self._transcribe_range(
-                    audio_path, start_from, duration, duration,
-                    language, on_progress, on_chunk_done, song_mode, song_opts
-                )
-            else:
-                return self._transcribe_single(
-                    audio_path, language, on_progress, on_chunk_done, song_mode, song_opts
-                )
-
-        # Long files: split into 10-min chunks with overlap
+        start_from = max(0.0, min(float(start_from or 0.0), duration - 1))
+        bounds = self._chunk_bounds(pcm, sr, start_from, duration)
+        num_chunks = len(bounds) - 1
         all_segments = []
-        chunk_starts = []
-        pos = start_from
-        while pos < duration:
-            chunk_starts.append(pos)
-            pos += self.CHUNK_DURATION
-        num_chunks = len(chunk_starts)
 
-        for i, chunk_start in enumerate(chunk_starts):
-            chunk_end = min(chunk_start + self.CHUNK_DURATION + self.OVERLAP, duration)
+        for i in range(num_chunks):
+            c0, c1 = bounds[i], bounds[i + 1]
+            audio, _ = sf.read(pcm, start=int(c0 * sr), stop=int(c1 * sr), dtype="float32")
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
 
-            def make_chunk_progress(chunk_idx):
-                def _progress(p):
-                    if on_progress:
-                        base = start_from / duration if duration > 0 else 0
-                        chunk_frac = (chunk_idx + p) / num_chunks
-                        overall = base + (1 - base) * chunk_frac
-                        on_progress(min(overall, 0.99))
-                return _progress
+            def _progress(p, i=i):
+                if on_progress:
+                    base = start_from / duration
+                    on_progress(min(0.99, base + (1 - base) * (i + p) / num_chunks))
 
-            chunk_segments = self._transcribe_range(
-                audio_path, chunk_start, chunk_end, duration,
-                language,
-                on_progress=make_chunk_progress(i),
-                on_chunk_done=None,
-                song_mode=song_mode,
-                song_opts=song_opts,
-            )
-
-            for seg in chunk_segments:
-                if all_segments and seg["start"] < all_segments[-1]["end"] - 0.1:
-                    continue
-                all_segments.append(seg)
-
+            if self.backend == "mlx":
+                segs = self._mlx_transcribe(audio, language, c0, _progress, song_mode, vocabulary)
+            else:
+                segs = self._fw_transcribe(audio, language, c0, _progress, song_mode, song_opts, vocabulary)
+            all_segments.extend(segs)
             if on_chunk_done:
                 on_chunk_done(list(all_segments), i + 1, num_chunks)
 
         if on_progress:
             on_progress(1.0)
-
         return all_segments
 
-    # ── Backend-specific transcription ──
-
-    def _transcribe_single(self, audio_path, language, on_progress, on_chunk_done, song_mode=False, song_opts=None):
-        """Transcribe entire file (short files, no extraction)."""
-        if self.backend == "mlx":
-            results = self._mlx_transcribe(audio_path, language, 0, on_progress, song_mode)
-        else:
-            results = self._fw_transcribe(audio_path, language, 0, on_progress, song_mode, song_opts)
-
-        if on_chunk_done:
-            on_chunk_done(results, 1, 1)
-        return results
-
-    def _transcribe_range(self, audio_path, start_sec, end_sec, total_duration,
-                          language, on_progress, on_chunk_done, song_mode=False, song_opts=None):
-        """Extract time range via ffmpeg, then transcribe."""
-        chunk_duration = end_sec - start_sec
-        tmp_path = None
-
-        try:
-            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
-            os.close(tmp_fd)
-
-            run_ffmpeg(
-                ["-y", "-ss", str(start_sec), "-t", str(chunk_duration),
-                 "-i", audio_path, "-ac", "1", "-ar", "16000", tmp_path],
-                capture_output=True, timeout=60,
-            )
-
-            if self.backend == "mlx":
-                results = self._mlx_transcribe(tmp_path, language, start_sec, on_progress, song_mode)
+    @classmethod
+    def _chunk_bounds(cls, pcm, sr, start, duration, search=30.0):
+        """[start, b1, ..., duration]: a boundary every ~CHUNK_DURATION seconds,
+        moved to the quietest 0.3 s within ±search of the nominal point."""
+        import soundfile as sf
+        bounds, pos = [start], start
+        while duration - pos > cls.CHUNK_DURATION + search:
+            a = pos + cls.CHUNK_DURATION - search
+            b = pos + cls.CHUNK_DURATION + search
+            y, _ = sf.read(pcm, start=int(a * sr), stop=int(b * sr), dtype="float32")
+            if y.ndim > 1:
+                y = y.mean(axis=1)
+            hop = int(0.02 * sr)
+            n = len(y) // hop
+            if n < 16:
+                cut = pos + cls.CHUNK_DURATION
             else:
-                results = self._fw_transcribe(tmp_path, language, start_sec, on_progress, song_mode, song_opts)
-
-            if on_chunk_done:
-                on_chunk_done(results, 1, 1)
-            return results
-
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+                energy = (y[:n * hop].reshape(n, hop) ** 2).mean(axis=1)
+                smooth = np.convolve(energy, np.ones(15) / 15, mode="same")
+                cut = a + (int(np.argmin(smooth)) + 0.5) * 0.02
+            bounds.append(round(cut, 3))
+            pos = cut
+        bounds.append(duration)
+        return bounds
 
     # ── mlx-whisper backend (Apple Metal GPU) ──
 
-    def _mlx_transcribe(self, audio_path, language, time_offset, on_progress, song_mode=False):
-        """Transcribe using mlx-whisper on Metal GPU."""
+    def _mlx_transcribe(self, audio, language, time_offset, on_progress, song_mode=False, vocabulary=None):
+        """Transcribe using mlx-whisper on Metal GPU (`audio`: path or 16 kHz array)."""
         import mlx_whisper
 
         opts = {
@@ -359,8 +327,11 @@ class Transcriber:
             else:
                 opts["initial_prompt"] = "Song lyrics:"
                 opts["no_speech_threshold"] = 0.25
+        if vocabulary:
+            # mlx-whisper has no hotwords; a prompt listing the terms works similarly.
+            opts["initial_prompt"] = ((opts.get("initial_prompt") or "") + " " + vocabulary).strip()
 
-        result = mlx_whisper.transcribe(audio_path, **opts)
+        result = mlx_whisper.transcribe(audio, **opts)
 
         detected_lang = result.get("language", language or "")
         segments_raw = result.get("segments", [])
@@ -398,7 +369,8 @@ class Transcriber:
 
     # ── faster-whisper backend (CUDA / CPU) ──
 
-    def _fw_transcribe(self, audio_path, language, time_offset, on_progress, song_mode=False, song_opts=None):
+    def _fw_transcribe(self, audio, language, time_offset, on_progress, song_mode=False, song_opts=None,
+                       vocabulary=None):
         """Transcribe using faster-whisper (CTranslate2).
 
         For song_mode, audio is assumed to already be vocal-isolated (e.g. by
@@ -431,7 +403,9 @@ class Transcriber:
                 fw_opts["initial_prompt"] = "Song lyrics."
         else:
             fw_opts["vad_parameters"] = {"min_silence_duration_ms": 300}
-        segments_iter, info = self.model.transcribe(audio_path, **fw_opts)
+        if vocabulary:
+            fw_opts["hotwords"] = vocabulary
+        segments_iter, info = self.model.transcribe(audio, **fw_opts)
 
         detected_lang = info.language
         duration = info.duration or 1

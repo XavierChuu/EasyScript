@@ -641,6 +641,7 @@ async function runTranscribe(resumeFromPlayhead = false) {
         model: selectedModel,
         language: selectedLang,
         start_from: startFrom,
+        vocabulary: (document.getElementById("vocabularyInput")?.value || "").trim() || null,
       }),
     });
 
@@ -682,7 +683,7 @@ async function runTranscribe(resumeFromPlayhead = false) {
       try {
         progressTracker.update(0.95, "diarizing", "Waiting for speaker identification...");
         const diarizeResult = await _parallelDiarizePromise;
-        applyDiarizeResult(diarizeResult);
+        await applyDiarizeResult(diarizeResult);
         progressTracker.update(1, "done",
           `Done — ${(result.segments || []).length} segments, ${diarizeResult.num_speakers} speakers`);
       } catch (dErr) {
@@ -961,6 +962,11 @@ function updateSegmentCount(segs) {
 let currentFilter = "all";
 let speakerMap = {};  // { "SPEAKER_00": "Speaker A", ... }
 let hasSpeakers = false;
+const PREF_IDS = ["modelSelect", "languageSelect", "vocabularyInput", "speakerSensitivitySelect",
+  "speakerSpeedSelect", "includeSpeakersCheck", "matchVoicesCheck", "rememberVoicesCheck", "tagSpeakerMode"];
+let speakerEmbeddings = {};   // speaker id → centroid embedding (voice library)
+let diarizeExclusive = null;  // exclusive turns of the last diarization
+let recognisedSpeakers = {};  // speaker id → {name, score} matched from saved voices
 
 function getSpeakerColorIndex(speakerId) {
   const speakers = Object.keys(speakerMap);
@@ -1050,8 +1056,11 @@ function renderSegments(segs) {
       const tag = el("span", "speaker-tag", speakerMap[seg.speaker] || seg.speaker);
       tag.dataset.speaker = seg.speaker;
       tag.dataset.color = String(getSpeakerColorIndex(seg.speaker));
-      tag.title = "Click to rename";
-      tag.addEventListener("click", (e) => { e.stopPropagation(); startSpeakerRename(tag); });
+      if (recognisedSpeakers[seg.speaker]) tag.classList.add("recognised");
+      tag.title = recognisedSpeakers[seg.speaker]
+        ? `Recognised from saved voices (${Math.round(recognisedSpeakers[seg.speaker].score * 100)}%) · click for options`
+        : "Click to rename or move this line to another speaker";
+      tag.addEventListener("click", (e) => { e.stopPropagation(); openSpeakerMenu(tag, source); });
       row.appendChild(tag);
     }
     row.appendChild(el("span", "segment-time", `${formatTime(seg.start)} – ${formatTime(seg.end)}`));
@@ -1090,20 +1099,13 @@ function startSpeakerRename(tagEl) {
   input.focus();
   input.select();
 
+  let done = false;
   const finishRename = () => {
+    if (done) return;
+    done = true;
     const newLabel = input.value.trim() || currentLabel;
-    speakerMap[speakerId] = newLabel;
-
-    // Update ALL segments with this speaker
-    segments.forEach(seg => {
-      if (seg.speaker === speakerId) {
-        seg.speakerLabel = newLabel;
-      }
-    });
-
-    // Re-render
-    const filtered = currentFilter === "all" ? segments : segments.filter(s => s.type === currentFilter);
-    renderSegments(filtered);
+    if (newLabel !== currentLabel) renameSpeaker(speakerId, newLabel);
+    rerenderSegments();
   };
 
   input.addEventListener("blur", finishRename);
@@ -1111,6 +1113,115 @@ function startSpeakerRename(tagEl) {
     if (e.key === "Enter") { e.preventDefault(); input.blur(); }
     if (e.key === "Escape") { input.value = currentLabel; input.blur(); }
   });
+}
+
+function rerenderSegments() {
+  const filtered = currentFilter === "all" ? segments : segments.filter(s => s.type === currentFilter);
+  renderSegments(filtered);
+  if (waveform.peaks.length > 0) waveform.draw();
+}
+
+/** Rename a speaker. A name another speaker already has merges the two. */
+function renameSpeaker(speakerId, newLabel) {
+  const target = Object.keys(speakerMap).find(
+    (k) => k !== speakerId && (speakerMap[k] || "").toLowerCase() === newLabel.toLowerCase());
+  if (target) {
+    segments.forEach((s) => {
+      if (s.speaker === speakerId) { s.speaker = target; s.speakerLabel = speakerMap[target]; }
+    });
+    delete speakerMap[speakerId];
+    showStatus(`Merged into ${speakerMap[target]}`, false, "SPEAKERS");
+  } else {
+    speakerMap[speakerId] = newLabel;
+    segments.forEach((s) => { if (s.speaker === speakerId) s.speakerLabel = newLabel; });
+  }
+  rememberVoice(speakerId, target ? speakerMap[target] : newLabel);
+}
+
+/** Save a named speaker's voice so later videos recognise them. */
+function rememberVoice(speakerId, name) {
+  if (!document.getElementById("rememberVoicesCheck")?.checked) return;
+  const emb = speakerEmbeddings[speakerId];
+  if (!emb || !name || /^Speaker [A-Z0-9]+$/i.test(name)) return;
+  fetchBackend("/voices", { method: "POST", body: JSON.stringify({ name, embedding: emb }) })
+    .then(() => { showStatus(`Voice "${name}" saved — it will be recognised in other videos`, false, "VOICES"); refreshVoiceList(); })
+    .catch((e) => console.warn("[EasyScript] save voice failed:", e));
+}
+
+function closeSpeakerMenu() {
+  document.querySelectorAll(".speaker-menu").forEach((m) => m.remove());
+}
+
+/** Speaker tag menu: rename the speaker, or move this line to another one. */
+function openSpeakerMenu(tagEl, seg) {
+  closeSpeakerMenu();
+  const spk = tagEl.dataset.speaker;
+  const menu = el("div", "speaker-menu");
+  const item = (label, fn, color) => {
+    const b = el("button", null, label);
+    if (color) { const sw = el("span", "swatch"); sw.style.background = color; b.prepend(sw); }
+    b.addEventListener("click", (e) => { e.stopPropagation(); closeSpeakerMenu(); fn(); });
+    menu.appendChild(b);
+  };
+  menu.appendChild(el("div", "speaker-menu-title", speakerMap[spk] || spk));
+  item("Rename speaker…", () => startSpeakerRename(tagEl));
+  menu.appendChild(el("div", "sep"));
+  menu.appendChild(el("div", "speaker-menu-title", "Move this line to"));
+  Object.keys(speakerMap).filter((k) => k !== spk).forEach((k) => {
+    item(speakerMap[k], () => reassignSegmentSpeaker(seg, k), SPEAKER_WAVE_COLORS[getSpeakerColorIndex(k)]);
+  });
+  item("+ New speaker", () => reassignSegmentSpeaker(seg, null));
+  menu.addEventListener("click", (e) => e.stopPropagation());
+  document.body.appendChild(menu);
+  const r = tagEl.getBoundingClientRect();
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = `${Math.max(4, Math.min(r.left, window.innerWidth - w - 4))}px`;
+  menu.style.top = `${r.bottom + h + 4 > window.innerHeight ? Math.max(4, r.top - h - 4) : r.bottom + 4}px`;
+  setTimeout(() => document.addEventListener("click", closeSpeakerMenu, { once: true }), 0);
+}
+
+/** Move one line to another speaker (null = a new speaker). */
+function reassignSegmentSpeaker(seg, speakerId) {
+  if (!speakerId) {
+    let n = 1;
+    while (speakerMap[`MANUAL_${n}`]) n++;
+    speakerId = `MANUAL_${n}`;
+    const used = new Set(Object.values(speakerMap));
+    let i = 0;
+    while (used.has(i < 26 ? `Speaker ${String.fromCharCode(65 + i)}` : `Speaker ${i + 1}`)) i++;
+    speakerMap[speakerId] = i < 26 ? `Speaker ${String.fromCharCode(65 + i)}` : `Speaker ${i + 1}`;
+  }
+  seg.speaker = speakerId;
+  seg.speakerLabel = speakerMap[speakerId];
+  hasSpeakers = true;
+  rerenderSegments();
+}
+
+async function refreshVoiceList() {
+  const list = document.getElementById("voiceList");
+  const count = document.getElementById("voiceCount");
+  if (!list || !backendConnected) return;
+  try {
+    const data = await fetchBackend("/voices");
+    const voices = data.voices || [];
+    list.textContent = "";
+    if (count) count.textContent = String(voices.length);
+    voices.forEach((v) => {
+      const row = el("div", "voice-item");
+      row.appendChild(el("span", "voice-name", v.name));
+      row.appendChild(el("span", "voice-meta", `${v.samples}×`));
+      const del = el("button", null, "✕");
+      del.title = `Forget ${v.name}`;
+      del.addEventListener("click", async () => {
+        await fetchBackend("/voices/delete", { method: "POST", body: JSON.stringify({ name: v.name }) });
+        refreshVoiceList();
+      });
+      row.appendChild(del);
+      list.appendChild(row);
+    });
+  } catch (e) {
+    console.warn("[EasyScript] voices:", e);
+  }
 }
 
 function renderTranslationSegments() {
@@ -1823,30 +1934,17 @@ async function downloadFile(content, filename, mimeType) {
  * This ensures each clip in the exported XML belongs to exactly one speaker,
  * so the editor can assign cameras per clip.
  */
-function splitAndAssignSpeakers(diarizeRaw) {
-  // Never split a single Whisper sentence across speakers — Whisper's sentence
-  // boundaries are more trustworthy than pyannote's frame-level turns. Each
-  // sentence is attributed whole to the speaker who occupies the most of it
-  // (dominant overlap). Fixes the bug where "Tôi" → A and "là một bác sĩ" → B.
-  for (const seg of segments) {
-    if (seg.type !== "speech") continue;
+function hasTranslations() {
+  return Object.values(translationData || {}).some((arr) => Array.isArray(arr) && arr.some((x) => x && x.text));
+}
 
-    const overlapBySpeaker = {};
-    for (const d of diarizeRaw) {
-      const ov = Math.min(d.end, seg.end) - Math.max(d.start, seg.start);
-      if (ov > 0) overlapBySpeaker[d.speaker] = (overlapBySpeaker[d.speaker] || 0) + ov;
-    }
+function matchVoicesEnabled() {
+  return !!document.getElementById("matchVoicesCheck")?.checked;
+}
 
-    let dominant = null, best = 0;
-    for (const spk in overlapBySpeaker) {
-      if (overlapBySpeaker[spk] > best) { best = overlapBySpeaker[spk]; dominant = spk; }
-    }
-
-    seg.speaker = dominant || "UNKNOWN";
-    seg.speakerLabel = dominant ? (speakerMap[dominant] || "Unknown") : "Unknown";
-  }
-
-  segments = segments.sort((a, b) => a.start - b.start);
+// Speech segment as sent to the backend (words drive word-level attribution).
+function speechPayload(s) {
+  return { start: s.start, end: s.end, text: s.text, language: s.language, type: "speech", words: s.words || [] };
 }
 
 function round3(n) { return Math.round(n * 1000) / 1000; }
@@ -1860,16 +1958,18 @@ async function startDiarizeBackend(audioPath) {
   const knownInput = parseInt(document.getElementById("knownSpeakersInput")?.value ?? "0", 10);
   const numSpeakers = Number.isFinite(knownInput) && knownInput > 0 ? knownInput : null;
   const sensitivity = document.getElementById("speakerSensitivitySelect")?.value || "standard";
+  const speed = document.getElementById("speakerSpeedSelect")?.value || null;
   await fetchBackend("/diarize", {
     method: "POST",
     body: JSON.stringify({
       audio_path: audioPath,
-      segments: speechSegs.map(s => ({
-        start: s.start, end: s.end, text: s.text,
-        language: s.language, type: s.type,
-      })),
+      segments: speechSegs.map(speechPayload),
       num_speakers: numSpeakers,
       sensitivity: sensitivity,
+      speed: speed,
+      match_voices: matchVoicesEnabled(),
+      // Translations are stored per segment: don't split lines once they exist.
+      split: !hasTranslations(),
     }),
   });
 }
@@ -1878,39 +1978,39 @@ async function startDiarizeBackend(audioPath) {
  * Apply diarization result to current segments.
  * If no speech segments exist yet (standalone mode), create segments from diarize_raw.
  */
-function applyDiarizeResult(result) {
-  if (result.speaker_map) {
-    speakerMap = result.speaker_map;
-    hasSpeakers = true;
-  }
+async function applyDiarizeResult(result) {
+  speakerEmbeddings = result.speaker_embeddings || {};
+  diarizeExclusive = result.exclusive || null;
+  recognisedSpeakers = result.voice_matches || {};
+  speakerMap = result.speaker_map || {};
 
-  const hasSpeechSegs = segments.some(s => s.type === "speech");
+  const nonSpeech = segments.filter(s => s.type !== "speech");
+  const speech = segments.filter(s => s.type === "speech");
+  const asSpeech = (list) => list.map((s) => ({ ...s, type: "speech" }));
 
-  if (hasSpeechSegs) {
-    // Has transcription — split speech segments at speaker boundaries
-    if (result.diarize_raw && result.diarize_raw.length > 0) {
-      splitAndAssignSpeakers(result.diarize_raw);
-    } else if (result.segments) {
-      result.segments.forEach(updSeg => {
-        const match = segments.find(s =>
-          s.type === "speech" && Math.abs(s.start - updSeg.start) < 0.5
-        );
-        if (match) {
-          match.speaker = updSeg.speaker;
-          match.speakerLabel = updSeg.speakerLabel;
-        }
-      });
-    }
+  if (speech.length && (result.segments || []).length) {
+    // Backend attributed every word and split lines at real speaker changes.
+    segments = nonSpeech.concat(asSpeech(result.segments)).sort((a, b) => a.start - b.start);
+  } else if (speech.length && diarizeExclusive) {
+    // Transcribed in parallel with diarization: attribute the words now.
+    const res = await fetchBackend("/speakers/assign", {
+      method: "POST",
+      body: JSON.stringify({
+        segments: speech.map(speechPayload), exclusive: diarizeExclusive,
+        speaker_embeddings: speakerEmbeddings, speaker_map: speakerMap,
+        match_voices: matchVoicesEnabled(), split: !hasTranslations(),
+      }),
+    });
+    speakerMap = res.speaker_map || speakerMap;
+    recognisedSpeakers = res.voice_matches || recognisedSpeakers;
+    segments = nonSpeech.concat(asSpeech(res.segments || speech)).sort((a, b) => a.start - b.start);
   } else if (result.diarize_raw && result.diarize_raw.length > 0) {
-    // No transcription yet — create speech segments from raw diarization
-    // Group consecutive diarize segments by speaker
+    // No transcription yet — one speech segment per speaker turn.
     const dRaw = result.diarize_raw;
     const grouped = [];
     let cur = { speaker: dRaw[0].speaker, start: dRaw[0].start, end: dRaw[0].end };
-
     for (let i = 1; i < dRaw.length; i++) {
       if (dRaw[i].speaker === cur.speaker && dRaw[i].start - cur.end < 0.5) {
-        // Same speaker, small gap — merge
         cur.end = dRaw[i].end;
       } else {
         grouped.push(cur);
@@ -1918,25 +2018,24 @@ function applyDiarizeResult(result) {
       }
     }
     grouped.push(cur);
-
-    // Create speech segments with speaker labels
     const newSegs = grouped.map(g => ({
-      type: "speech",
-      start: round3(g.start),
-      end: round3(g.end),
-      text: "",
-      speaker: g.speaker,
-      speakerLabel: speakerMap[g.speaker] || "Unknown",
+      type: "speech", start: round3(g.start), end: round3(g.end), text: "",
+      speaker: g.speaker, speakerLabel: speakerMap[g.speaker] || g.speaker,
     }));
-
-    // Keep existing non-speech segments (silence/breath), add new speaker segments
-    const nonSpeech = segments.filter(s => s.type !== "speech");
     segments = [...nonSpeech, ...newSegs].sort((a, b) => a.start - b.start);
   }
+
+  // Every speaker on a line needs a label.
+  segments.forEach((s) => {
+    if (s.type === "speech" && s.speaker && !speakerMap[s.speaker]) speakerMap[s.speaker] = s.speakerLabel || s.speaker;
+  });
+  hasSpeakers = Object.keys(speakerMap).length > 0;
 
   renderSegments(segments);
   updateSegmentCount(segments);
   if (waveform.peaks.length > 0) waveform.draw();
+  const names = Object.values(recognisedSpeakers).map((m) => m.name);
+  if (names.length) showStatus(`Recognised ${names.join(", ")} from saved voices`, false, "VOICES");
 }
 
 /**
@@ -1988,10 +2087,11 @@ async function runDiarize() {
 
   try {
     await startDiarizeBackend(audioPath);
-    const result = await progressTracker.pollUntilDone("/diarize/progress");
+    const result = await progressTracker.pollUntilDone("/diarize/progress", null,
+      () => fetchBackend("/diarize/cancel", { method: "POST" }).catch(() => {}));
 
     progressTracker.update(1, "done", `Done — ${result.num_speakers} speakers identified`);
-    applyDiarizeResult(result);
+    await applyDiarizeResult(result);
 
   } catch (err) {
     if (err.message !== "__CANCELLED__") {
@@ -2227,11 +2327,79 @@ function reRenderCurrentSegments() {
  * Split a speech segment's text based on display settings.
  * Returns an array of sub-segments (each with start/end/text/speaker etc.)
  */
+// ── Word timing ──
+// Whisper's word timestamps — unless the line was edited and no longer matches.
+function _normText(t) { return (t || "").normalize("NFC").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, ""); }
+function segmentWords(seg) {
+  const w = seg && seg.words;
+  if (!w || !w.length) return null;
+  return _normText(w.map((x) => x.word).join("")) === _normText(seg.text) ? w : null;
+}
+
+// Character span of every word inside `text` (null if they don't line up).
+function wordSpans(text, words) {
+  const spans = [];
+  let cur = 0;
+  for (const w of words) {
+    const tok = (w.word || "").trim().normalize("NFC");
+    if (!tok) { spans.push([cur, cur]); continue; }
+    const j = text.indexOf(tok, cur);
+    if (j < 0 || j - cur > 3 + tok.length) return null;
+    spans.push([j, j + tok.length]);
+    cur = j + tok.length;
+  }
+  return spans;
+}
+
+// Word index groups [[i0, i1), ...] for the current display mode.
+function wordGroups(words) {
+  const n = words.length;
+  if (n <= 1) return null;
+  const groups = [];
+  if (segLineBreakMode === "word") {
+    for (let i = 0; i < n; i++) groups.push([i, i + 1]);
+  } else if (segLineBreakMode === "punctuation") {
+    let i0 = 0;
+    for (let i = 0; i < n - 1; i++) {
+      if (/[.!?;,。！？，；]$/.test((words[i].word || "").trim())) { groups.push([i0, i + 1]); i0 = i + 1; }
+    }
+    groups.push([i0, n]);
+  } else if (segLineBreakMode === "maxWords" && segMaxWords > 0) {
+    for (let i = 0; i < n; i += segMaxWords) groups.push([i, Math.min(n, i + segMaxWords)]);
+  } else {
+    return null;
+  }
+  return groups.length > 1 ? groups : null;
+}
+
+function wordPieces(seg, words, groups) {
+  const text = seg.text.trim().normalize("NFC");
+  const spans = wordSpans(text, words);
+  return groups.map(([i0, i1], k) => {
+    const last = k === groups.length - 1;
+    const piece = spans
+      ? text.slice(spans[i0][0], last ? text.length : spans[i1][0]).trim()
+      : words.slice(i0, i1).map((w) => (w.word || "").trim()).join(" ");
+    return {
+      ...seg, text: piece, words: words.slice(i0, i1),
+      start: k === 0 ? seg.start : words[i0].start,
+      end: last ? seg.end : Math.max(words[i1 - 1].end, words[i0].start + 0.05),
+      _displaySplit: true, _parentIndex: seg._origIndex,
+    };
+  });
+}
+
 function splitSegmentForDisplay(seg) {
   if (seg.type !== "speech" || !seg.text) return [seg];
 
   const text = seg.text.trim();
   if (!text) return [seg];
+  const words = segmentWords(seg);
+  if (words) {
+    const groups = wordGroups(words);
+    return groups ? wordPieces(seg, words, groups) : [seg];
+  }
+  // No word timings (edited line, translation): split time by characters.
   const duration = seg.end - seg.start;
 
   function makeChunks(chunks) {
@@ -2285,7 +2453,7 @@ function splitSegmentForDisplay(seg) {
 function initSettings() {
   // Settings popup overlay — opened by the gear icon, closed by ✕ / backdrop / Esc.
   const overlay = document.getElementById("settingsOverlay");
-  const openSettings = () => overlay && overlay.classList.remove("hidden");
+  const openSettings = () => { if (overlay) overlay.classList.remove("hidden"); refreshVoiceList(); };
   const closeSettings = () => overlay && overlay.classList.add("hidden");
   document.getElementById("settingsBtn")?.addEventListener("click", openSettings);
   document.getElementById("settingsCloseBtn")?.addEventListener("click", closeSettings);
@@ -2545,6 +2713,7 @@ waveform.init();
 audioPlayback.init();
 initSettings();
 initSegmentSettings();
+restorePrefs();
 beatUI.init();
 updateExportButtons();   // Apply / XML / subtitle buttons stay off until there is something to apply
 updateActionButtons();
@@ -2552,6 +2721,28 @@ updateActionButtons();
   let tab = "cut";
   try { tab = localStorage.getItem("easyscript.tab") || "cut"; } catch (e) {}
   setActiveTab(["cut", "text", "beats"].includes(tab) ? tab : "cut");
+}
+
+// Options remembered between sessions (per viewer, best effort).
+function restorePrefs() {
+  let prefs = {};
+  try { prefs = JSON.parse(localStorage.getItem("easyscript.prefs") || "{}") || {}; } catch (e) {}
+  PREF_IDS.forEach((id) => {
+    const e = document.getElementById(id);
+    if (!e || !(id in prefs)) return;
+    if (e.type === "checkbox") e.checked = !!prefs[id];
+    else if (e.tagName !== "SELECT" || [...e.options].some((o) => o.value === prefs[id])) e.value = prefs[id];
+  });
+  PREF_IDS.forEach((id) => document.getElementById(id)?.addEventListener("change", savePrefs));
+}
+
+function savePrefs() {
+  const prefs = {};
+  PREF_IDS.forEach((id) => {
+    const e = document.getElementById(id);
+    if (e) prefs[id] = e.type === "checkbox" ? e.checked : e.value;
+  });
+  try { localStorage.setItem("easyscript.prefs", JSON.stringify(prefs)); } catch (e) {}
 }
 
 // Try auto-start server, then check connection
@@ -2587,6 +2778,9 @@ function resetAnalysisState() {
   hasTranscription = false;
   hasSpeakers = false;
   speakerMap = {};
+  speakerEmbeddings = {};
+  diarizeExclusive = null;
+  recognisedSpeakers = {};
   translationData = {};
   audioDuration = 0;
   cutsApplied = false;
@@ -2664,6 +2858,7 @@ async function loadAudioFromTimeline() {
       nodeId: useRender ? "" : (clip.nodeId || ""),
       nested: !!clip.nested,
       sequenceID: clip.sequenceID || "",
+      sourcePath: useRender ? "" : (clip.path || ""),
     };
     waveform.setFrameRate(seqTimebase.fps);
 
@@ -2885,22 +3080,21 @@ async function labelSpeakerClips() {
 
   const btn = getBtn("labelSpeakerBtn");
   const label = btn ? btn.textContent : "";
-  if (btn) { btn.disabled = true; btn.textContent = "Labeling…"; }
+  const mode = document.getElementById("tagSpeakerMode")?.value || "xml";
+  if (btn) { btn.disabled = true; btn.textContent = mode === "xml" ? "Building…" : "Labeling…"; }
   try {
     if (!window.bridge || !bridge.available()) throw new Error("Not running inside Premiere Pro.");
     await ensureSameSequence();
-    await refreshTimebase();
+    const tb = await refreshTimebase();
     const speakers = Object.keys(speakerMap);
     const LABEL_INDICES = [4, 1, 2, 6, 9, 5, 11, 13];
     const speakerColor = {};
     speakers.forEach((spk, i) => { speakerColor[spk] = LABEL_INDICES[i % LABEL_INDICES.length]; });
-
-    // Analysis → sequence time. After Apply cut / Cut to new sequence the
-    // removed frames are subtracted, so labels land on the right clips.
-    const outP = (loadedClipInfo && loadedClipInfo.outPoint) || Infinity;
-    const toSeq = (t) => analysisToSeqTime(t);
+    const speakerName = {};
+    speakers.forEach((spk) => { speakerName[spk] = speakerMap[spk] || spk; });
 
     // Speech segments with a speaker, clamped to the clip, sorted (analysis time).
+    const outP = (loadedClipInfo && loadedClipInfo.outPoint) || Infinity;
     const spSegs = segments
       .filter((s) => s.type === "speech" && s.speaker)
       .map((s) => ({ start: Math.max(s.start, 0), end: Math.min(s.end, outP), speaker: s.speaker }))
@@ -2908,20 +3102,49 @@ async function labelSpeakerClips() {
       .sort((a, b) => a.start - b.start);
     if (spSegs.length === 0) { showStatus("No speaker segments within the clip.", true); return; }
 
-    // Boundaries where the speaker changes (midpoint of the gap), in sequence time.
-    const boundaries = [];
-    for (let i = 1; i < spSegs.length; i++) {
-      if (spSegs[i].speaker !== spSegs[i - 1].speaker) {
-        boundaries.push(toSeq((spSegs[i - 1].end + spSegs[i].start) / 2));
-      }
+    // Speaker runs; a change point sits in the middle of the gap between runs.
+    const runs = [];
+    spSegs.forEach((s) => {
+      const last = runs[runs.length - 1];
+      if (last && last.speaker === s.speaker) last.end = Math.max(last.end, s.end);
+      else runs.push({ ...s });
+    });
+    const changes = [];
+    for (let i = 1; i < runs.length; i++) changes.push((runs[i - 1].end + runs[i].start) / 2);
+    const toSeq = (t) => analysisToSeqTime(t);
+
+    if (mode === "xml") {
+      // Exact: rebuild the sequence with an edit at every change, clips named
+      // and coloured per speaker; music / B-roll stay untouched.
+      const toTicks = (t) => frameToTicks(secToFrameRound(toSeq(t), tb), tb);
+      const end = (loadedClipInfo && loadedClipInfo.duration) || runs[runs.length - 1].end;
+      const labels = runs.map((r, i) => ({
+        start_ticks: toTicks(i === 0 ? 0 : changes[i - 1]),
+        end_ticks: toTicks(i === runs.length - 1 ? end : changes[i]),
+        name: speakerName[r.speaker], color: speakerColor[r.speaker],
+      }));
+      const t0 = performance.now();
+      const exported = await bridge.exportSequenceXML();
+      const res = await fetchBackend("/xml/cut", {
+        method: "POST",
+        body: JSON.stringify({
+          xml_path: exported.path, cuts_ticks: [], splits_ticks: changes.map(toTicks), labels,
+          only_media: loadedClipInfo && loadedClipInfo.sourcePath ? [loadedClipInfo.sourcePath] : [],
+          name_suffix: " (speakers)", file_label: "EasyScript speakers",
+        }),
+      });
+      if (btn) btn.textContent = "Importing…";
+      const opened = await bridge.importSequenceXML(res.path, res.name);
+      loadedClipInfo.sequenceID = opened.sequenceID;
+      loadedClipInfo.nodeId = "";  // imported clips are new project items
+      const secs = ((performance.now() - t0) / 1000).toFixed(1);
+      showStatus(`Opened "${opened.name}" — ${res.splits} speaker edits, ${res.labeled} clips named, ${secs}s`, false, "DONE");
+      return;
     }
+
+    // In place: 1-frame extract at each change, then rename clips.
     const segsSeq = spSegs.map((s) => ({ start: toSeq(s.start), end: toSeq(s.end), speaker: s.speaker }));
-
-    // Display names per speaker (e.g. "Speaker A") for the clip names.
-    const speakerName = {};
-    speakers.forEach((spk) => { speakerName[spk] = (speakerMap && speakerMap[spk]) || spk; });
-
-    const res = await bridge.labelSpeaker(boundaries, segsSeq, speakerColor, seqTimebase.fps, speakerName);
+    const res = await bridge.labelSpeaker(changes.map(toSeq), segsSeq, speakerColor, seqTimebase.fps, speakerName);
     console.log("[EasyScript] labelSpeaker result:", res);
     if ((res.renamed || 0) > 0) {
       showStatus(`${res.edits} speaker splits · renamed ${res.renamed} clips`, false, "DONE");

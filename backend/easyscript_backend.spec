@@ -68,12 +68,12 @@ try:
     lightning_data += collect_data_files("pytorch_lightning")
 except Exception:
     pass
-try:
-    torchcodec_data += collect_data_files("torchcodec")
-    from PyInstaller.utils.hooks import collect_dynamic_libs
-    torchcodec_binaries += collect_dynamic_libs("torchcodec")
-except Exception:
-    pass
+# torchcodec is NOT bundled: its native library must match the torch build
+# exactly and needs FFmpeg DLLs; a mismatch makes Windows block LoadLibrary
+# behind an invisible error dialog (the windowed backend hangs). pyannote falls
+# back cleanly without it, and audio always reaches pyannote / Demucs as
+# in-memory tensors.
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
 # Bundled ffmpeg via imageio-ffmpeg (no system FFmpeg install needed)
 ffmpeg_data = []
@@ -101,6 +101,28 @@ try:
 except Exception:
     pass
 
+# Speaker model (community-1, CC-BY-4.0), fetched into backend/models by the
+# build scripts so diarization works offline and without a HuggingFace token.
+speaker_model_data = []
+_spk_dir = os.path.join(os.path.dirname(os.path.abspath(SPEC)), "models", "speaker-diarization-community-1")
+if os.path.isfile(os.path.join(_spk_dir, "config.yaml")):
+    for _root, _dirs, _files in os.walk(_spk_dir):
+        if ".cache" in _root:
+            continue
+        for _f in _files:
+            _rel = os.path.relpath(_root, os.path.dirname(os.path.abspath(SPEC)))
+            speaker_model_data.append((os.path.join(_root, _f), _rel))
+else:
+    print("WARNING: backend/models/speaker-diarization-community-1 missing — "
+          "diarization will download it on first use")
+
+# opentelemetry (pyannote 4): namespace packages resolved at runtime
+otel_data = []
+try:
+    otel_data += collect_data_files("opentelemetry", include_py_files=True)
+except Exception:
+    pass
+
 # Transformers (Hy-MT2 / HunYuan translator) — submodules + data files
 transformers_data = []
 try:
@@ -113,9 +135,13 @@ except Exception:
 # .dist-info folders by default, causing StopIteration at runtime.
 package_metadata = []
 for _pkg in (
-    "torchcodec", "torchaudio", "torch", "transformers", "tokenizers",
+    "torchaudio", "torch", "transformers", "tokenizers",
     "huggingface_hub", "soundfile", "demucs", "pyannote.audio",
-    "pyannote.core", "scipy", "numpy", "faster_whisper", "ctranslate2",
+    "pyannote.core", "pyannote.pipeline", "pyannote.database", "pyannote.metrics",
+    "pyannoteai-sdk", "scipy", "numpy", "faster_whisper", "ctranslate2",
+    # pyannote 4 imports opentelemetry, which finds its context implementation
+    # through entry points — those live in the .dist-info metadata.
+    "opentelemetry-api", "opentelemetry-sdk",
 ):
     try:
         package_metadata += copy_metadata(_pkg)
@@ -156,6 +182,23 @@ if platform.system() == "Windows":
             _seen_dll.add(_name)
             nvidia_binaries.append((_dll, "."))
 
+# delvewheel side folders (<pkg>.libs, e.g. pandas.libs' private msvcp140-*.dll).
+# PyInstaller's hooks miss some of them, and the .pyd files then fail with
+# "DLL load failed" at runtime — so bundle every one found in site-packages.
+delvewheel_binaries = []
+if platform.system() == "Windows":
+    import glob as _glob
+    import site as _site
+    _seen_libs = set()
+    for _sp in _site.getsitepackages():
+        for _libdir in _glob.glob(os.path.join(_sp, "*.libs")):
+            _name = os.path.basename(_libdir)
+            if _name in _seen_libs or not os.path.isdir(_libdir):
+                continue
+            _seen_libs.add(_name)
+            for _dll in _glob.glob(os.path.join(_libdir, "*.dll")):
+                delvewheel_binaries.append((_dll, _name))
+
 # Bundled ffmpeg/ffprobe binaries (so users don't need to install separately)
 ffmpeg_binaries = []
 _bin_dir = os.path.join(os.path.dirname(os.path.abspath(SPEC)), "bin")
@@ -184,8 +227,8 @@ if platform.system() == "Darwin" and platform.machine() == "arm64":
 a = Analysis(
     ["backend_main.py"],
     pathex=[],
-    binaries=mlx_binaries + torchcodec_binaries + ffmpeg_binaries + nvidia_binaries,
-    datas=faster_whisper_data + ctranslate2_data + scipy_data + pyannote_data + speechbrain_data + torchcodec_data + mlx_data + demucs_data + transformers_data + package_metadata + ffmpeg_data + soundfile_data + lightning_data + collect_data_files("torchmetrics", include_py_files=True) + [
+    binaries=mlx_binaries + torchcodec_binaries + ffmpeg_binaries + nvidia_binaries + delvewheel_binaries,
+    datas=faster_whisper_data + ctranslate2_data + scipy_data + pyannote_data + speechbrain_data + torchcodec_data + mlx_data + demucs_data + transformers_data + package_metadata + ffmpeg_data + soundfile_data + lightning_data + speaker_model_data + otel_data + collect_data_files("torchmetrics", include_py_files=True) + [
         ("server.py", "."),
         ("transcriber.py", "."),
         ("silence_detector.py", "."),
@@ -197,6 +240,8 @@ a = Analysis(
         ("waveform.py", "."),
         ("beat_tracker.py", "."),
         ("xml_cut.py", "."),
+        ("speakers.py", "."),
+        ("voices.py", "."),
     ],
     hiddenimports=[
         # uvicorn internals
@@ -236,11 +281,17 @@ a = Analysis(
         # pyannote / torch (diarization)
         "torch",
         "torchaudio",
-        "torchcodec",
-        "torchcodec.decoders",
         "pyannote.audio",
+        "pyannote.audio.pipelines.speaker_diarization",
+        "pyannote.audio.pipelines.clustering",
         "pyannote.core",
         "pyannote.pipeline",
+        "pyannoteai",
+        "pyannoteai.sdk",
+        "opentelemetry",
+        "opentelemetry.context.contextvars_context",
+        "speakers",
+        "voices",
         "lightning_fabric",
         "pytorch_lightning",
         "speechbrain",
@@ -290,13 +341,12 @@ a = Analysis(
     + collect_submodules("speechbrain")
     + collect_submodules("pytorch_lightning")
     + collect_submodules("lightning_fabric")
-    + collect_submodules("torchcodec")
     + collect_submodules("transformers")
     + collect_submodules("torchmetrics"),
     hookspath=[os.path.join(os.path.dirname(os.path.abspath(SPEC)), "hooks")],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["torchcodec"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

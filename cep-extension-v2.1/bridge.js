@@ -255,7 +255,23 @@
       var bj = q(JSON.stringify({ boundaries: boundaries, fps: fps || 25 }));
       var cj = q(JSON.stringify({ segments: segments, speakerColor: speakerColor, speakerName: speakerName || {} }));
       return es("esSplitSpeakers('" + bj + "')").then(function (r1) {
-        var edits = (r1 && r1.indexOf("OK") === 0) ? (parseInt(r1.split("|")[1], 10) || 0) : 0;
+        var parts = (r1 && r1.indexOf("OK") === 0) ? r1.split("|") : [];
+        var edits = parts.length ? (parseInt(parts[1], 10) || 0) : 0;
+        // Every 1-frame extract shifts what follows one frame left: move the
+        // segments the same way so each clip is named after its own speaker.
+        var removed = (parts[4] || "").split(",").filter(Boolean).map(Number).sort(function (a, b) { return a - b; });
+        var frame = 1 / (fps || 25);
+        if (removed.length) {
+          var shift = function (t) {
+            var n = 0;
+            while (n < removed.length && removed[n] < t - 1e-6) n++;
+            return t - n * frame;
+          };
+          segments = segments.map(function (s) {
+            return { start: shift(s.start), end: shift(s.end), speaker: s.speaker };
+          });
+          cj = q(JSON.stringify({ segments: segments, speakerColor: speakerColor, speakerName: speakerName || {} }));
+        }
         // Settle the DOM after the QE split-extracts, then rename.
         var t0 = Date.now(), maxMs = 8000, last = -1, stable = 0;
         function settle() {

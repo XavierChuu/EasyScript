@@ -157,11 +157,12 @@
           <label class="field">
             <span class="field-label">Model</span>
             <select id="modelSelect">
-              <option value="tiny">Tiny — fast</option>
-              <option value="base">Base</option>
-              <option value="small">Small</option>
+              <option value="large-v3-turbo" selected>Turbo — recommended</option>
+              <option value="large-v3">Large V3 — slower</option>
               <option value="medium">Medium</option>
-              <option value="large-v3" selected>Large V3 — best</option>
+              <option value="small">Small</option>
+              <option value="base">Base</option>
+              <option value="tiny">Tiny — fastest</option>
             </select>
           </label>
           <label class="field">
@@ -213,6 +214,10 @@
             </select>
           </label>
         </div>
+        <label class="field">
+          <span class="field-label">Vocabulary <span class="field-note">— names, brands, terms (optional)</span></span>
+          <input type="text" id="vocabularyInput" placeholder="e.g. EasyScript, Nguyễn Văn An, Premiere" />
+        </label>
         <div class="model-info" id="modelInfo"></div>
         <div class="btn-grid">
           <button class="btn btn-primary" id="transcribeBtn" title="Speech to text · right-click: resume from the playhead">Transcribe</button>
@@ -229,11 +234,33 @@
             <div class="control">
               <label class="control-label" for="speakerSensitivitySelect">Sensitivity</label>
               <select id="speakerSensitivitySelect">
-                <option value="standard" selected>Standard — fewer speakers</option>
-                <option value="sensitive">Sensitive — pyannote default</option>
-                <option value="max">Maximum — catch very brief</option>
+                <option value="fewer">Fewer — merge similar voices</option>
+                <option value="standard" selected>Standard</option>
+                <option value="sensitive">Sensitive — brief speakers</option>
+                <option value="max">Maximum — very brief speakers</option>
               </select>
             </div>
+            <div class="control">
+              <label class="control-label" for="speakerSpeedSelect" title="Window hop of the speaker model. Auto = Balanced (as accurate as Accurate on our tests, 2x faster).">Speed</label>
+              <select id="speakerSpeedSelect">
+                <option value="" selected>Auto</option>
+                <option value="accurate">Accurate</option>
+                <option value="balanced">Balanced</option>
+                <option value="fast">Fast</option>
+              </select>
+            </div>
+            <label class="check">
+              <input type="checkbox" id="includeSpeakersCheck" />
+              <span>Identify speakers while transcribing</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="matchVoicesCheck" checked />
+              <span>Recognise saved voices</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="rememberVoicesCheck" checked />
+              <span>Remember a voice when I rename a speaker</span>
+            </label>
           </div>
         </details>
       </div>
@@ -245,6 +272,13 @@
           <select id="subtitleTimingMode">
             <option value="after" selected>After cut</option>
             <option value="before">Before cut (original)</option>
+          </select>
+        </div>
+        <div class="control">
+          <label class="control-label" for="tagSpeakerMode" title="New sequence: exact speaker edits, clip names and label colours via XML (original kept). In place: edits the active sequence (removes 1 frame per change).">Tag speaker</label>
+          <select id="tagSpeakerMode">
+            <option value="xml" selected>New sequence — exact</option>
+            <option value="inplace">In place</option>
           </select>
         </div>
         <div class="btn-grid btn-grid-3">
@@ -429,10 +463,16 @@
         <div class="settings-group">
           <div class="settings-title">Speakers</div>
           <div class="control">
-            <label class="control-label" for="hfTokenInput">HF token</label>
-            <input type="password" id="hfTokenInput" placeholder="hf_…" />
+            <label class="control-label">Saved voices</label>
+            <span class="control-value voice-count" id="voiceCount">0</span>
           </div>
-          <p class="hint">Required for speaker detection. <a href="https://huggingface.co/settings/tokens" target="_blank">Get a token</a></p>
+          <div class="voice-list" id="voiceList"></div>
+          <p class="hint">Rename a speaker to save their voice; matching speakers get the name automatically in later videos. Voices stay on this computer.</p>
+          <div class="control">
+            <label class="control-label" for="hfTokenInput">HF token</label>
+            <input type="password" id="hfTokenInput" placeholder="optional" />
+          </div>
+          <p class="hint">Not needed for speaker detection any more (the model downloads without a token, ~35 MB).</p>
         </div>
 
         <div class="settings-group">

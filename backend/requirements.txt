@@ -1,7 +1,7 @@
 fastapi==0.115.12
 uvicorn==0.34.2
 python-multipart>=0.0.18
-faster-whisper==1.1.1
+faster-whisper==1.2.1
 pydub==0.25.1
 webrtcvad==2.0.10
 setuptools<81  # webrtcvad imports pkg_resources (dropped in setuptools 81)
@@ -11,17 +11,27 @@ mlx-whisper>=0.4.0; sys_platform == "darwin" and platform_machine == "arm64"
 pyinstaller==6.13.0
 transformers>=4.40.0
 huggingface_hub>=0.22.0
-# pyannote.audio 3.x needs torchaudio.AudioMetaData (removed in 2.9) → keep torch/torchaudio < 2.9
+# torch 2.8 is the tested pair for pyannote.audio 4 (which needs >= 2.8); audio is fed
+# to pyannote as in-memory tensors, so torchcodec's FFmpeg decoders are never used.
 torch>=2.2.0,<2.9; sys_platform != "darwin" or platform_machine != "arm64"
 torchaudio>=2.2.0,<2.9
 soundfile>=0.12.0
 imageio-ffmpeg>=0.5.0
 # Optional: music vocal isolation (song mode)
 demucs>=4.0.0
-# Optional: speaker diarization
-pyannote.audio>=3.3.0,<4.0.0
+# Speaker diarization: community-1 pipeline (no HuggingFace token needed)
+pyannote.audio>=4.0.7,<5
+# pyannote 4 dependency. Its native lib must match torch exactly (0.7 ↔ torch 2.8);
+# it is excluded from the bundle (see easyscript_backend.spec).
+torchcodec>=0.7,<0.8
 # NVIDIA CUDA runtime DLLs (Windows GPU acceleration for faster-whisper).
 # Safe to install on machines without a GPU — they're just unused.
 nvidia-cublas-cu12; sys_platform == "win32"
 nvidia-cudnn-cu12; sys_platform == "win32"
 nvidia-cuda-nvrtc-cu12; sys_platform == "win32"
+# Speaker embeddings on any Windows GPU (DirectML). Replaces the plain
+# onnxruntime wheel that faster-whisper pulls in (same module; the build script
+# uninstalls onnxruntime first, so pip check reports faster-whisper's pin).
+onnxruntime-directml==1.23.0; sys_platform == "win32"
+# Build only: ONNX export of the speaker-embedding model
+onnx>=1.17

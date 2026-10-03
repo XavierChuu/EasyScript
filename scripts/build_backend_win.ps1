@@ -42,6 +42,14 @@ Write-Host "Installing dependencies (a few minutes)..." -ForegroundColor Yellow
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -r (Join-Path $BackendDir "requirements.txt")
 & $VenvPython -m pip install pyinstaller
+# onnxruntime (pulled in by faster-whisper) and onnxruntime-directml share the
+# `onnxruntime` module: keep only the DirectML build (it includes the CPU provider).
+& $VenvPython -m pip uninstall -y onnxruntime
+& $VenvPython -m pip install --force-reinstall --no-deps onnxruntime-directml==1.23.0
+
+Write-Host "Fetching the speaker model (community-1, ~33 MB)..." -ForegroundColor Yellow
+& $VenvPython -c "from huggingface_hub import snapshot_download; snapshot_download('pyannote-community/speaker-diarization-community-1', local_dir=r'$BackendDir\models\speaker-diarization-community-1', allow_patterns=['config.yaml', 'README.md', 'segmentation/*', 'embedding/*', 'plda/*'])"
+& $VenvPython (Join-Path $BackendDir "tools\export_embedding_onnx.py")
 
 Write-Host "Verifying bundled ffmpeg..." -ForegroundColor Yellow
 & $VenvPython -c "import imageio_ffmpeg, os; p = imageio_ffmpeg.get_ffmpeg_exe(); print('ffmpeg:', p)"

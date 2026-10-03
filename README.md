@@ -10,12 +10,13 @@
 - **Silence & breath detection** on the selected clip or the whole sequence, with padding / min-silence / threshold controls and a live preview on the waveform
 - **Apply Cut** directly on the timeline (frame-exact: cuts are snapped inward to the sequence's frame grid, so they never reach into speech)
 - **Export XML cut** — rebuilds the sequence as an FCP XML in one pass (much faster than razor-by-razor on hour-long timelines), optionally imported straight back into the project
-- **Split speakers** onto separate tracks after diarization
+- **Tag speaker** — an edit at every speaker change with clips named and colour-labelled per speaker, built as a new sequence (exact, music / B-roll untouched) or in place
 
 ### Transcript
-- **Whisper transcription** — mlx-whisper on Apple Silicon, faster-whisper on CUDA/CPU; models from Tiny to Large V3 / Turbo
+- **Whisper transcription** — mlx-whisper on Apple Silicon, faster-whisper on CUDA/CPU; Turbo by default (Vietnamese long-form benchmark: same accuracy as Large V3 at ~3× the speed), word-level timestamps, optional vocabulary (names / terms) to bias recognition
 - **Music / Song mode** — Demucs vocal isolation + tunable vocal sensitivity, phrase gap and decode quality
-- **Speaker diarization** (pyannote; needs a HuggingFace token)
+- **Speaker diarization** — pyannote community-1, bundled, no HuggingFace token; every word is attributed to its speaker and lines are split where the speaker really changes
+- **Voice library** — rename a speaker once and they are recognised by voice in later videos; move a line to another speaker or merge two speakers from the speaker tag
 - **Translation** — local (NLLB / Ollama) or Claude API, multiple target languages side by side
 - **Search & replace**, display modes (sentence / word / punctuation / max words per line)
 - **Captions** — export SRT (original or after cuts) and create a Premiere captions track
@@ -116,5 +117,5 @@ MIT License
 - [Whisper](https://github.com/openai/whisper) by OpenAI
 - [mlx-whisper](https://github.com/ml-explore/mlx-examples) by Apple MLX team
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) by SYSTRAN
-- [pyannote-audio](https://github.com/pyannote/pyannote-audio) for speaker diarization
+- [pyannote-audio](https://github.com/pyannote/pyannote-audio) for speaker diarization; the bundled [speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) pipeline is by pyannoteAI, licensed [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
 - [FastAPI](https://fastapi.tiangolo.com/) for the backend framework

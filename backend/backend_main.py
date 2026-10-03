@@ -37,6 +37,16 @@ except Exception:
     if sys.stderr is None:
         sys.stderr = _NullStream()
 
+# Windowed backend: a DLL that fails to load must raise, not open a system
+# error dialog nobody can see (which blocks the loading thread forever).
+if sys.platform == "win32":
+    try:
+        import ctypes
+        # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
+    except Exception:
+        pass
+
 # Must run before anything else in a PyInstaller bundle (avoids fork bombs).
 multiprocessing.freeze_support()
 try:
@@ -58,6 +68,16 @@ def _log(msg):
 def main():
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    # pyannote imports matplotlib. PyInstaller's runtime hook points its config
+    # dir at a temp folder deleted on exit, so the font cache (minutes on
+    # Windows) would be rebuilt on the first diarization of every launch.
+    mpl_dir = os.path.join(os.path.expanduser("~"), ".easyscript", "matplotlib")
+    try:
+        os.makedirs(mpl_dir, exist_ok=True)
+        os.environ["MPLCONFIGDIR"] = mpl_dir
+    except OSError:
+        pass
+    os.environ.setdefault("MPLBACKEND", "Agg")
     port = int(os.environ.get("PORT", "9876"))
 
     if getattr(sys, "_MEIPASS", None):

@@ -51,3 +51,6 @@ ZXPSignCmd.exe
 backend/venv-win/
 backend/build_backend/
 backend/dist_backend/
+
+# Speaker model fetched by the build scripts (bundled into the backend)
+backend/models/

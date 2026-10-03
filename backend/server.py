@@ -23,6 +23,8 @@ import uuid
 from transcriber import Transcriber, is_model_cached, MODEL_SIZES
 from silence_detector import SilenceDetector
 from diarizer import Diarizer
+import speakers as speaker_attr
+import voices as voice_lib
 from translator import get_translator, OllamaTranslator, HyMT2Translator, NLLBTranslator
 from ffmpeg_utils import run_ffmpeg, run_silent, get_ffmpeg_exe
 import security
@@ -49,14 +51,19 @@ transcribe_cancel = False
 transcriber = None
 diarizer = None
 
+# Benchmarked on 22 min of Vietnamese (FLEURS, long-form, RTX 3060):
+# turbo 11.3 % WER at 50x real time, large-v3 11.2 % at 18x, PhoWhisper-large
+# 15.7 % (lower-case, no punctuation) — so Turbo is the default.
 AVAILABLE_MODELS = [
+    {"id": "large-v3-turbo", "name": "Turbo", "size": "~1.6GB", "speed": "Fast", "quality": "Best",
+     "default": True, "note": "Recommended — large-v3 accuracy, ~3x faster"},
+    {"id": "large-v3", "name": "Large V3", "size": "~3GB", "speed": "Slow", "quality": "Best"},
+    {"id": "medium", "name": "Medium", "size": "~1.5GB", "speed": "Medium", "quality": "Great"},
+    {"id": "small", "name": "Small", "size": "~460MB", "speed": "Fast", "quality": "Good"},
+    {"id": "base", "name": "Base", "size": "~140MB", "speed": "Faster", "quality": "Fair"},
     {"id": "tiny", "name": "Tiny", "size": "~75MB", "speed": "Fastest", "quality": "Low"},
-    {"id": "base", "name": "Base", "size": "~140MB", "speed": "Fast", "quality": "Fair"},
-    {"id": "small", "name": "Small", "size": "~460MB", "speed": "Medium", "quality": "Good"},
-    {"id": "medium", "name": "Medium", "size": "~1.5GB", "speed": "Slow", "quality": "Great"},
-    {"id": "large-v3-turbo", "name": "Turbo", "size": "~800MB", "speed": "Fast", "quality": "Best"},
-    {"id": "large-v3", "name": "Large V3", "size": "~3GB", "speed": "Slowest", "quality": "Best"},
 ]
+DEFAULT_MODEL = "large-v3-turbo"
 
 
 @asynccontextmanager
@@ -78,7 +85,7 @@ def _ensure_transcriber():
     """Lazy-load transcriber on first use."""
     global transcriber
     if transcriber is None:
-        model_size = os.environ.get("WHISPER_MODEL", "tiny")
+        model_size = os.environ.get("WHISPER_MODEL", DEFAULT_MODEL)
         device = os.environ.get("WHISPER_DEVICE", "auto")
         transcriber = Transcriber(model_size=model_size, device=device)
 
@@ -111,6 +118,7 @@ class TranscribeRequest(BaseModel):
     song_vad_threshold: float | None = None     # VAD threshold 0.10–0.90 (default 0.40)
     song_min_silence_ms: int | None = None      # Phrase gap 200–2000ms (default 700)
     song_beam_size: int | None = None           # Beam search width 1–5 (default 1)
+    vocabulary: str | None = None               # names / terms to bias recognition
 
 class SwitchModelRequest(BaseModel):
     model: str
@@ -123,9 +131,15 @@ class DiarizeRequest(BaseModel):
     num_speakers: Optional[int] = None
     min_speakers: Optional[int] = None
     max_speakers: Optional[int] = None
-    # "standard" | "sensitive" | "max" — controls pyannote's
-    # min_cluster_size + clustering threshold for brief-utterance detection.
+    # "fewer" | "standard" | "sensitive" | "max" — VBx clustering presets
+    # (see diarizer.SENSITIVITY).
     sensitivity: Optional[str] = None
+    # "accurate" | "balanced" | "fast" — segmentation hop; None = balanced.
+    speed: Optional[str] = None
+    # Name speakers that match a voice saved in the voice library.
+    match_voices: bool = True
+    # False: never split a segment (translations are indexed per segment).
+    split: bool = True
 
 class TranslateRequest(BaseModel):
     segments: list[dict]  # [{ text: "...", start: ..., end: ... }]
@@ -537,8 +551,12 @@ def detect_beats(req: BeatsRequest):
 
 class XmlCutRequest(BaseModel):
     xml_path: str                      # FCP XML exported by Premiere (host.jsx)
-    cuts_ticks: list                   # [[start_ticks, end_ticks], ...] sequence time
+    cuts_ticks: list = []              # [[start_ticks, end_ticks], ...] sequence time
     name_suffix: str = " (EasyScript cut)"
+    splits_ticks: list = []            # extra edit points (Tag speaker), nothing removed
+    labels: list = []                  # [{start_ticks, end_ticks, name, color}] clip names/colours
+    only_media: list = []              # splits/labels only on clips of these files (+ linked)
+    file_label: str = "EasyScript cut"
 
 
 @app.post("/xml/cut")
@@ -548,17 +566,24 @@ def xml_cut_sequence(req: XmlCutRequest):
         return JSONResponse(status_code=400, content={"error": "Exported sequence XML not found"})
     try:
         cuts = [[int(a), int(b)] for a, b in req.cuts_ticks]
-    except (TypeError, ValueError):
-        return JSONResponse(status_code=400, content={"error": "cuts_ticks must be [[start, end], ...]"})
+        splits = [int(t) for t in req.splits_ticks]
+        labels = [{"start_ticks": int(x["start_ticks"]), "end_ticks": int(x["end_ticks"]),
+                   "name": str(x.get("name") or "")[:120], "color": x.get("color")}
+                  for x in req.labels]
+    except (TypeError, ValueError, KeyError):
+        return JSONResponse(status_code=400, content={"error": "Invalid cuts / splits / labels"})
     stamp = _time_module.strftime("%Y%m%d-%H%M%S")
     try:
         import xml.etree.ElementTree as _ET
         seq_name = (_ET.parse(src).getroot().findtext(".//sequence/name") or "Sequence")
     except Exception:
         seq_name = "Sequence"
-    dst = os.path.join(export_dir, f"{xml_cut.safe_filename(seq_name)} - EasyScript cut {stamp}.xml")
+    tag = xml_cut.safe_filename(req.file_label, "EasyScript cut")
+    dst = os.path.join(export_dir, f"{xml_cut.safe_filename(seq_name)} - {tag} {stamp}.xml")
     try:
-        result = xml_cut.cut_sequence_xml(src, dst, cuts, name_suffix=req.name_suffix)
+        result = xml_cut.cut_sequence_xml(src, dst, cuts, name_suffix=req.name_suffix,
+                                          splits_ticks=splits, labels=labels,
+                                          only_media=[str(m) for m in req.only_media if m])
     except xml_cut.XmlCutError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:
@@ -720,7 +745,8 @@ def _separate_vocals(audio_path):
 
 
 def _run_transcribe_worker(audio_path, model, language, start_from, song_mode=False,
-                           song_vad_threshold=None, song_min_silence_ms=None, song_beam_size=None):
+                           song_vad_threshold=None, song_min_silence_ms=None, song_beam_size=None,
+                           vocabulary=None):
     """Background worker for whisper transcription with chunked processing."""
     global transcriber, transcribe_progress
 
@@ -834,9 +860,12 @@ def _run_transcribe_worker(audio_path, model, language, start_from, song_mode=Fa
             song_vad_threshold=song_vad_threshold,
             song_min_silence_ms=song_min_silence_ms,
             song_beam_size=song_beam_size,
+            vocabulary=(vocabulary or "").strip()[:800] or None,
+            cache_dir=WAVEFORM_CACHE_DIR,
         )
 
-        # Format final segments
+        # Final segments keep their word timestamps (subtitle timing, word
+        # display, word-level speaker attribution).
         result_segments = [
             {
                 "start": seg["start"],
@@ -845,6 +874,8 @@ def _run_transcribe_worker(audio_path, model, language, start_from, song_mode=Fa
                 "language": seg.get("language"),
                 "speaker": seg.get("speaker"),
                 "type": "speech",
+                "words": [{"word": w["word"], "start": w["start"], "end": w["end"],
+                           "p": w.get("probability")} for w in seg.get("words") or []],
             }
             for seg in speech_segments
         ]
@@ -891,6 +922,7 @@ def transcribe_audio(req: TranscribeRequest):
             "song_vad_threshold": req.song_vad_threshold,
             "song_min_silence_ms": req.song_min_silence_ms,
             "song_beam_size": req.song_beam_size,
+            "vocabulary": req.vocabulary,
         },
         daemon=True,
     )
@@ -948,90 +980,94 @@ def update_settings(data: dict):
 def get_diarize_progress():
     return diarize_progress
 
-def _run_diarize_worker(audio_path, speech_segments,
-                        num_speakers=None, min_speakers=None, max_speakers=None,
-                        sensitivity=None):
-    """Background worker for speaker diarization."""
+def _label_speakers(segments, embeddings, match_voices=True):
+    """Display labels in order of first appearance; saved voices name their match."""
+    order = speaker_attr.speaker_order(segments) or list(embeddings)
+    for spk in embeddings:
+        if spk not in order:
+            order.append(spk)
+    matches = voice_lib.match({k: embeddings[k] for k in order if k in embeddings}) if match_voices else {}
+    labels = speaker_attr.default_labels(order, {k: v["name"] for k, v in matches.items()})
+    return labels, matches
+
+
+def _attach_labels(segments, speaker_map):
+    for seg in segments:
+        spk = seg.get("speaker")
+        if spk:
+            seg["speakerLabel"] = speaker_map.get(spk, spk)
+    return segments
+
+
+def _run_diarize_worker(audio_path, speech_segments, num_speakers=None, min_speakers=None,
+                        max_speakers=None, sensitivity=None, speed=None, match_voices=True,
+                        split=True):
+    """Background worker for speaker diarization (community-1, no token needed)."""
     global diarize_progress, diarizer
 
     try:
-        # Ensure file is accessible (macOS TCC may block ~/Documents etc.)
         audio_path = ensure_accessible(audio_path)
-
-        settings = load_settings()
-        hf_token = settings.get("hf_token", "") or os.environ.get("HF_TOKEN", "")
-
-        if not hf_token:
-            diarize_progress.update({
-                "status": "error", "progress": 0.0,
-                "stage": "error",
-                "detail": "HuggingFace token required. Configure in Settings.",
-            })
-            return
-
         audio_duration = get_audio_duration(audio_path)
         dur_str = ""
         if audio_duration > 0:
             dm, ds = int(audio_duration // 60), int(audio_duration % 60)
             dur_str = f" ({dm}m {ds:02d}s audio)"
 
-        # Initialize diarizer (lazy load)
-        if diarizer is None or diarizer.hf_token != hf_token:
+        hf_token = load_settings().get("hf_token", "") or os.environ.get("HF_TOKEN", "")
+        if diarizer is None:
             diarize_progress.update({
-                "progress": 0.05, "stage": "loading_model",
-                "detail": f"Loading speaker diarization model...{dur_str} (first run downloads ~700MB)",
+                "progress": 0.03, "stage": "loading_model",
+                "detail": f"Loading speaker model...{dur_str} (first run downloads ~35 MB)",
             })
             diarizer = Diarizer(hf_token=hf_token)
+            diarizer._ensure_pipeline()
 
-        diarize_progress.update({
-            "progress": 0.10, "stage": "diarizing",
-            "detail": f"Identifying speakers...{dur_str}",
-        })
+        device = diarizer.engine or "CPU"
 
         def on_progress(p):
-            pct = 0.10 + p * 0.80  # 10% → 90%
             diarize_progress.update({
-                "progress": round(pct, 3),
-                "stage": "diarizing",
-                "detail": f"Identifying speakers... {round(p * 100)}%{dur_str}",
+                "progress": round(0.05 + p * 0.87, 3), "stage": "diarizing",
+                "detail": f"Identifying speakers ({device})... {round(p * 100)}%{dur_str}",
             })
 
-        diarize_segments = diarizer.diarize(
+        on_progress(0.0)
+        result = diarizer.diarize(
             audio_path, on_progress=on_progress,
-            num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            sensitivity=sensitivity,
+            num_speakers=num_speakers, min_speakers=min_speakers, max_speakers=max_speakers,
+            sensitivity=sensitivity, speed=speed,
+            cancelled=lambda: diarize_progress.get("cancel", False),
         )
 
-        diarize_progress.update({
-            "progress": 0.92, "stage": "merging",
-            "detail": "Merging speaker labels with transcription...",
-        })
+        diarize_progress.update({"progress": 0.94, "stage": "merging",
+                                 "detail": "Assigning speakers to words..."})
+        updated = speaker_attr.assign_speakers(speech_segments or [], result["exclusive"], split=split)
+        speaker_map, matches = _label_speakers(updated, result["embeddings"], match_voices)
+        _attach_labels(updated, speaker_map)
 
-        # Merge with speech segments
-        updated_segments, speaker_map = Diarizer.merge_speakers_into_segments(
-            speech_segments, diarize_segments
-        )
-
-        num_speakers = len(speaker_map)
+        n = len(result["embeddings"]) or len({t["speaker"] for t in result["turns"]})
+        named = f", {len(matches)} recognised" if matches else ""
         diarize_progress.update({
-            "status": "done", "progress": 1.0,
-            "stage": "done",
-            "detail": f"Done — {num_speakers} speakers identified",
+            "status": "done", "progress": 1.0, "stage": "done",
+            "detail": f"Done — {n} speakers identified{named}",
             "result": {
-                "segments": updated_segments,
+                "segments": updated,
                 "speaker_map": speaker_map,
-                "num_speakers": num_speakers,
-                "diarize_raw": diarize_segments,
+                "num_speakers": n,
+                "diarize_raw": result["turns"],
+                "exclusive": result["exclusive"],
+                "speaker_embeddings": result["embeddings"],
+                "voice_matches": matches,
             },
         })
-
+    except InterruptedError:
+        diarize_progress.update({"status": "cancelled", "progress": 0.0, "stage": "cancelled",
+                                 "detail": "Cancelled"})
     except Exception as e:
         diarize_progress.update({
             "status": "error", "progress": 0.0,
             "stage": "error", "detail": str(e),
         })
+
 
 @app.post("/diarize")
 def diarize_audio(req: DiarizeRequest):
@@ -1053,12 +1089,72 @@ def diarize_audio(req: DiarizeRequest):
             "min_speakers": req.min_speakers,
             "max_speakers": req.max_speakers,
             "sensitivity": req.sensitivity,
+            "speed": req.speed,
+            "match_voices": req.match_voices,
+            "split": req.split,
         },
         daemon=True,
     )
     thread.start()
 
     return {"status": "started", "message": "Diarization started. Poll /diarize/progress for updates."}
+
+
+@app.post("/diarize/cancel")
+def diarize_cancel():
+    diarize_progress["cancel"] = True
+    return {"status": "cancelling"}
+
+
+class AssignSpeakersRequest(BaseModel):
+    segments: list[dict]
+    exclusive: list[dict]                  # diarize result "exclusive"
+    speaker_embeddings: dict = {}
+    speaker_map: dict = {}                 # keep labels the user already chose
+    match_voices: bool = True
+    split: bool = True
+
+
+@app.post("/speakers/assign")
+def assign_speakers(req: AssignSpeakersRequest):
+    """Word-level speaker attribution for segments transcribed after (or in
+    parallel with) diarization."""
+    updated = speaker_attr.assign_speakers(req.segments, req.exclusive, split=req.split)
+    speaker_map, matches = _label_speakers(updated, req.speaker_embeddings, req.match_voices)
+    for k, v in (req.speaker_map or {}).items():
+        if k in speaker_map and k not in matches:
+            speaker_map[k] = v
+    _attach_labels(updated, speaker_map)
+    return {"segments": updated, "speaker_map": speaker_map, "voice_matches": matches}
+
+
+# ── Voice library (remember named speakers across videos) ──
+
+class SaveVoiceRequest(BaseModel):
+    name: str
+    embedding: list[float]
+
+
+@app.get("/voices")
+def get_voices():
+    return {"voices": voice_lib.list_voices()}
+
+
+@app.post("/voices")
+def save_voice(req: SaveVoiceRequest):
+    try:
+        return voice_lib.save_voice(req.name, req.embedding)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+class DeleteVoiceRequest(BaseModel):
+    name: str
+
+
+@app.post("/voices/delete")
+def delete_voice(req: DeleteVoiceRequest):
+    return {"deleted": voice_lib.delete_voice(req.name)}
 
 
 # ── Translation (async — translate in background thread) ──

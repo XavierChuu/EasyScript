@@ -12,6 +12,9 @@ echo "=== Building EasyScript headless backend (macOS) ==="
 [ -x "$PY" ] || { echo "venv missing — create: python3.11 -m venv backend/venv && backend/venv/bin/pip install -r backend/requirements.txt"; exit 1; }
 
 "$PY" -m pip install -q pyinstaller >/dev/null 2>&1 || true
+echo "Fetching the speaker model (community-1, ~33 MB)..."
+"$PY" -c "from huggingface_hub import snapshot_download; snapshot_download('pyannote-community/speaker-diarization-community-1', local_dir='$ROOT/backend/models/speaker-diarization-community-1', allow_patterns=['config.yaml', 'README.md', 'segmentation/*', 'embedding/*', 'plda/*'])"
+"$PY" "$ROOT/backend/tools/export_embedding_onnx.py"
 
 cd "$BK"
 "$PYI" easyscript_backend.spec --distpath ./dist_backend --workpath ./build_backend -y

@@ -729,7 +729,11 @@ function esSplitSpeakers(dataJson) {
             catch (ex) { if (errs.length < 5) errs.push("ex@" + tt.toFixed(2) + ":" + ex.message); }
         }
         _restoreTimelineState(seq, saved, removed, tpf);
-        return "OK|" + split + "|" + skipped + "|" + boundaries.length;
+        // Removed frames (sequence seconds, pre-edit) so the caller can map its
+        // segment times onto the shifted timeline before naming clips.
+        var rem = [];
+        for (var r = 0; r < removed.length; r++) rem.push((removed[r][0] / TICKS).toFixed(6));
+        return "OK|" + split + "|" + skipped + "|" + boundaries.length + "|" + rem.join(",");
     } catch (e) {
         return "ERROR: " + e.message;
     }

@@ -196,6 +196,73 @@ class XmlCutTest(unittest.TestCase):
         self.assertEqual(res["cuts"], 3)
         self.assertEqual(res["removed_frames"], 60 + 100 + 50)
 
+    def run_split(self, xml_text, cuts=(), splits=(), labels=(), only_media=None):
+        d = tempfile.mkdtemp()
+        src, dst = os.path.join(d, "in.xml"), os.path.join(d, "out.xml")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write(xml_text)
+        res = xml_cut.cut_sequence_xml(src, dst, list(cuts), splits_ticks=list(splits), labels=list(labels),
+                                       only_media=only_media)
+        with open(dst, encoding="utf-8") as f:
+            return res, ET.fromstring(f.read().split("\n", 2)[2])
+
+    def test_split_points_without_removal(self):
+        v, a = linked_av()
+        res, root = self.run_split(sequence(v, a, 750), splits=[300 * TPF25, 520 * TPF25 + 7])
+        self.assertEqual((res["removed_frames"], res["splits"]), (0, 2))
+        self.assertEqual(root.findtext("sequence/duration"), "750")
+        for kind, track in (("video", 1), ("audio", 1), ("audio", 2)):
+            got = [self.se(c) for c in self.items(root, kind, track)]
+            self.assertEqual(got, [(0, 300, 100, 400), (300, 520, 400, 620), (520, 750, 620, 850)])
+        for k, vc in enumerate(self.items(root, "video"), start=1):
+            refs = {l.findtext("linkclipref") for l in vc.findall("link")}
+            self.assertEqual(refs, {f"clipitem-1-{k}", f"clipitem-2-{k}", f"clipitem-3-{k}"})
+
+    def test_split_with_cut_and_labels(self):
+        v, a = linked_av()
+        labels = [{"start_ticks": 0, "end_ticks": 300 * TPF25, "name": "Lan", "color": 4},
+                  {"start_ticks": 300 * TPF25, "end_ticks": 750 * TPF25, "name": "Minh", "color": "mango"}]
+        # A split inside the cut is dropped; the cut removes 100..150.
+        res, root = self.run_split(sequence(v, a, 750), cuts=frames((100, 150)),
+                                   splits=[120 * TPF25, 300 * TPF25], labels=labels)
+        self.assertEqual(res["splits"], 1)
+        got = [self.se(c) for c in self.items(root, "video")]
+        self.assertEqual(got, [(0, 100, 100, 200), (100, 250, 250, 400), (250, 700, 400, 850)])
+        for kind, track in (("video", 1), ("audio", 2)):
+            names = [c.findtext("name") for c in self.items(root, kind, track)]
+            colors = [c.findtext("labels/label2") for c in self.items(root, kind, track)]
+            self.assertEqual(names, ["Lan", "Lan", "Minh"])
+            self.assertEqual(colors, ["Cerulean", "Cerulean", "Mango"])
+        self.assertEqual(res["labeled"], 9)
+
+    def test_only_media_leaves_music_untouched(self):
+        v, a = linked_av()
+        music = ('<clipitem id="clipitem-9"><name>song.wav</name><duration>9000</duration>'
+                 f"{rate()}<start>0</start><end>750</end><in>0</in><out>750</out>"
+                 '<file id="file-9"><name>song.wav</name>'
+                 "<pathurl>file://localhost/C%3a/music/song.wav</pathurl></file></clipitem>")
+        labels = [{"start_ticks": 0, "end_ticks": 750 * TPF25, "name": "Lan", "color": 1}]
+        res, root = self.run_split(sequence(v, a + [music], 750), splits=[300 * TPF25], labels=labels,
+                                   only_media=[r"C:\media\A001.mp4"])
+        self.assertEqual(len(self.items(root, "video")), 2)
+        self.assertEqual(len(self.items(root, "audio", 2)), 2)   # linked to the video: split
+        m = self.items(root, "audio", 3)
+        self.assertEqual([self.se(c) for c in m], [(0, 750, 0, 750)])
+        self.assertEqual(m[0].findtext("name"), "song.wav")
+        self.assertIsNone(m[0].find("labels"))
+        self.assertEqual(res["labeled"], 6)
+
+    def test_split_skips_transition_edges(self):
+        links = []
+        c1 = clip("clipitem-1", 0, -1, 0, 260, links)
+        tr = ('<transitionitem><start>240</start><end>260</end><alignment>center</alignment>'
+              f"{rate()}<effect><name>Cross Dissolve</name></effect></transitionitem>")
+        c2 = clip("clipitem-2", -1, 500, 10, 260, links, full_file=False)
+        res, root = self.run_split(sequence(c1 + tr + c2, [], 500), splits=[250 * TPF25, 400 * TPF25])
+        self.assertEqual(res["splits"], 1)
+        kinds = [c.tag for c in self.items(root, "video")]
+        self.assertEqual(kinds, ["clipitem", "transitionitem", "clipitem", "clipitem"])
+
 
 if __name__ == "__main__":
     unittest.main()

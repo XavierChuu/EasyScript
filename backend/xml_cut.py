@@ -14,6 +14,11 @@ pproTicks offsets (with constant speed / reverse), transitions (kept and shifted
 when no cut touches them, dropped otherwise), start/end = -1 edges next to
 transitions, sequence markers, duplicate <file>/nested <sequence> definitions.
 Not adjusted: effect keyframes inside split clips (reported as a warning).
+
+The same pass can also split clips at given points without removing anything
+and name / colour every resulting clip from labelled ranges — used by Tag
+speaker, so speaker changes become exact edit points instead of the 1-frame
+extracts an in-place edit needs.
 """
 
 import bisect
@@ -22,9 +27,13 @@ import os
 import re
 import uuid
 import xml.etree.ElementTree as ET
+from urllib.parse import unquote, urlparse
 
 TICKS_PER_SECOND = 254016000000
 CLIP_TAGS = ("clipitem", "generatoritem")
+# Premiere's label colours, in the order of its Label menu / setColorLabel().
+LABEL_COLORS = ("Violet", "Iris", "Caribbean", "Lavender", "Cerulean", "Forest", "Rose",
+                "Mango", "Purple", "Blue", "Teal", "Magenta", "Tan", "Green", "Brown", "Yellow")
 ITEM_TAGS = CLIP_TAGS + ("transitionitem",)
 
 
@@ -107,15 +116,24 @@ def _transition_cut_point(t):
 
 
 class CutMap:
-    """Sorted, merged cut ranges [a, b) in frames, with removed-time lookups."""
+    """Sorted, merged cut ranges [a, b) in frames, with removed-time lookups.
 
-    def __init__(self, cuts):
+    `splits` are extra edit points (frames) where clips are divided without
+    removing anything; points inside or on the edge of a cut are ignored.
+    """
+
+    def __init__(self, cuts, splits=()):
         self.cuts = cuts
         self.starts = [a for a, _ in cuts]
         self.ends = [b for _, b in cuts]
         self.prefix = [0]
         for a, b in cuts:
             self.prefix.append(self.prefix[-1] + (b - a))
+        self.splits = sorted({int(f) for f in splits if not self._in_cut(int(f))})
+
+    def _in_cut(self, f):
+        i = bisect.bisect_right(self.starts, f) - 1
+        return i >= 0 and f <= self.cuts[i][1]
 
     @property
     def total(self):
@@ -135,11 +153,25 @@ class CutMap:
         return f - self.removed_before(f)
 
     def keep_index(self, f):
-        """Index of the kept interval containing f = number of cuts ending at or before f."""
-        return bisect.bisect_right(self.ends, f)
+        """Index of the kept interval containing f: number of cuts ending and
+        split points at or before f (linked partners share it)."""
+        return bisect.bisect_right(self.ends, f) + bisect.bisect_right(self.splits, f)
 
-    def pieces(self, s, e):
-        """[s, e) minus all cuts."""
+    def pieces(self, s, e, split=True):
+        """[s, e) minus all cuts, divided at split points (if `split`)."""
+        if not split:
+            return self._kept(s, e)
+        out = []
+        for a, b in self._kept(s, e):
+            i = bisect.bisect_right(self.splits, a)
+            while i < len(self.splits) and self.splits[i] < b:
+                out.append((a, self.splits[i]))
+                a = self.splits[i]
+                i += 1
+            out.append((a, b))
+        return out
+
+    def _kept(self, s, e):
         out, cur = [], s
         i = bisect.bisect_right(self.ends, s)
         while i < len(self.cuts) and cur < e:
@@ -297,10 +329,96 @@ def _normalize_definitions(root, top_seq, defs):
                     el.remove(child)
 
 
-def cut_sequence_xml(src_path, dst_path, cuts_ticks, name_suffix=" (EasyScript cut)"):
+class _Labels:
+    """Labelled frame ranges; a clip takes the label covering most of it."""
+
+    def __init__(self, labels):
+        self.items = sorted(labels, key=lambda x: x[0])
+        self.starts = [x[0] for x in self.items]
+
+    def best(self, a, b):
+        i = max(0, bisect.bisect_right(self.starts, a) - 1)
+        win, cover = None, 0
+        while i < len(self.items) and self.items[i][0] < b:
+            s, e, name, color = self.items[i]
+            ov = min(e, b) - max(s, a)
+            if ov > cover:
+                win, cover = (name, color), ov
+            i += 1
+        return win
+
+
+def _apply_label(piece, label):
+    name, color = label
+    if name:
+        _set_text(piece, "name", name)
+    if color:
+        labels = piece.find("labels")
+        if labels is None:
+            labels = ET.SubElement(piece, "labels")
+        _set_text(labels, "label2", color)
+
+
+def _media_key(path):
+    """Comparable form of a media path or an FCP <pathurl>."""
+    p = (path or "").strip()
+    if p.lower().startswith("file:"):
+        u = urlparse(p)
+        p = unquote(u.path or "")
+        if re.match(r"^/[A-Za-z]:", p):          # file://localhost/C:/...
+            p = p[1:]
+    return os.path.normcase(os.path.normpath(p.replace("\\", "/"))) if p else ""
+
+
+def _eligible_clips(tracks, defs, only_media):
+    """Ids of clips whose source is one of `only_media`, plus their link partners."""
+    keys = {_media_key(m) for m in only_media if m}
+    keys.discard("")
+    file_path = {fid: _media_key(el.findtext("pathurl")) for fid, el in defs.get("file", {}).items()}
+    hit, links = set(), {}
+    for _kind, _idx, track in tracks:
+        for ch in track:
+            if ch.tag not in CLIP_TAGS:
+                continue
+            cid = ch.get("id")
+            f = ch.find("file")
+            path = None
+            if f is not None:
+                path = _media_key(f.findtext("pathurl")) if f.find("pathurl") is not None else file_path.get(f.get("id"))
+            if path and path in keys:
+                hit.add(cid)
+            links[cid] = {l.findtext("linkclipref") for l in ch.findall("link")}
+    out = set(hit)
+    for cid in hit:
+        out |= links.get(cid, set())
+    return out
+
+
+def _label_color(value):
+    """Colour name from a name or a Premiere label index (0-15)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, int) or str(value).strip().isdigit():
+        return LABEL_COLORS[int(value) % len(LABEL_COLORS)]
+    v = str(value).strip()
+    for c in LABEL_COLORS:
+        if c.lower() == v.lower():
+            return c
+    return None
+
+
+def cut_sequence_xml(src_path, dst_path, cuts_ticks, name_suffix=" (EasyScript cut)",
+                     splits_ticks=None, labels=None, only_media=None):
     """Write a cut copy of the sequence in `src_path` to `dst_path`.
 
-    cuts_ticks: [[start_ticks, end_ticks], ...] in sequence time.
+    cuts_ticks:   [[start_ticks, end_ticks], ...] in sequence time.
+    splits_ticks: [ticks, ...] extra edit points (nothing is removed there).
+    labels:       [{start_ticks, end_ticks, name, color}] — every resulting clip
+                  is renamed / coloured from the range covering most of it
+                  (color: Premiere label name or index 0-15).
+    only_media:   media paths — splits and labels apply only to clips of these
+                  files and the clips linked to them (music / B-roll untouched).
+                  Empty = every clip.
     Returns a summary dict (name, removed frames/seconds, clip counts, warnings).
     """
     try:
@@ -322,10 +440,26 @@ def cut_sequence_xml(src_path, dst_path, cuts_ticks, name_suffix=" (EasyScript c
 
     cuts = normalize_cuts(
         [(round(int(a) / tpf), round(int(b) / tpf)) for a, b in cuts_ticks], duration)
-    cm = CutMap(cuts)
+    # Split points must not land inside a transition (its clips share the edge).
+    trans_spans = []
+    for _k, _i, track in tracks:
+        for ch in track:
+            if ch.tag == "transitionitem":
+                trans_spans.append((_int(ch.findtext("start")), _int(ch.findtext("end"))))
+    splits = []
+    for t in splits_ticks or []:
+        f = round(int(t) / tpf)
+        if 0 < f < duration and not any(a - 1 <= f <= b + 1 for a, b in trans_spans):
+            splits.append(f)
+    cm = CutMap(cuts, splits)
+    lab = _Labels([(round(int(x["start_ticks"]) / tpf), round(int(x["end_ticks"]) / tpf),
+                    (x.get("name") or "").strip() or None, _label_color(x.get("color")))
+                   for x in (labels or []) if int(x["end_ticks"]) > int(x["start_ticks"])])
+    labeled = 0
     warnings = []
     index_mode = _clip_like_index_mode(seq)
     defs = _collect_definitions(root, seq)
+    eligible = _eligible_clips(tracks, defs, only_media) if only_media else None
 
     pieces_by_key = {}   # (orig_id, keep_index) -> piece
     all_pieces = []
@@ -357,7 +491,8 @@ def cut_sequence_xml(src_path, dst_path, cuts_ticks, name_suffix=" (EasyScript c
 
             clips_before += 1
             s, e = r["s"], r["e"]
-            parts = cm.pieces(s, e)
+            targeted = eligible is None or el.get("id") in eligible
+            parts = cm.pieces(s, e, split=targeted)
             if not parts:
                 continue
             clip_tpf = _rate_tpf(el, tpf)
@@ -387,6 +522,10 @@ def cut_sequence_xml(src_path, dst_path, cuts_ticks, name_suffix=" (EasyScript c
                 _set_text(piece, "end", -1 if last_edge else ns + (b - a))
                 if untouched:
                     # Only moved: keep the source range exactly as exported.
+                    best = lab.best(a, b) if (lab.items and targeted) else None
+                    if best:
+                        _apply_label(piece, best)
+                        labeled += 1
                     info = {"el": piece, "orig": orig_id, "id": new_id,
                             "keep": cm.keep_index(a), "kind": kind, "track": track_index}
                     pieces_by_key[(orig_id, info["keep"])] = info
@@ -417,6 +556,10 @@ def cut_sequence_xml(src_path, dst_path, cuts_ticks, name_suffix=" (EasyScript c
                     _set_text(piece, "pproTicksIn", np_in)
                     _set_text(piece, "pproTicksOut", np_out)
 
+                best = lab.best(a, b) if (lab.items and targeted) else None
+                if best:
+                    _apply_label(piece, best)
+                    labeled += 1
                 info = {"el": piece, "orig": orig_id, "id": new_id,
                         "keep": cm.keep_index(a), "kind": kind, "track": track_index}
                 pieces_by_key[(orig_id, info["keep"])] = info
@@ -494,6 +637,8 @@ def cut_sequence_xml(src_path, dst_path, cuts_ticks, name_suffix=" (EasyScript c
         "path": dst_path,
         "name": name,
         "cuts": len(cuts),
+        "splits": len(cm.splits),
+        "labeled": labeled,
         "removed_frames": cm.total,
         "removed_seconds": round(cm.total * tpf / TICKS_PER_SECOND, 3),
         "duration_frames": new_duration,
