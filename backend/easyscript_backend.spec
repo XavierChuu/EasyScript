@@ -347,6 +347,12 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=["torchcodec"],
+    # transformers builds docstrings at import time (@auto_docstring) and, for
+    # some classes, reads its own source path via inspect.getsourcefile(). From
+    # the PYZ archive that path doesn't exist and the import raises "Unrolling
+    # kwargs is not supported for __call__ of None class" (NLLB / Hy-MT2
+    # translation). Collect it as real .py files instead.
+    module_collection_mode={"transformers": "py"},
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
