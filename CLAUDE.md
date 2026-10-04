@@ -17,6 +17,7 @@
 - Backend: Python 3.10/3.11, FastAPI, faster-whisper / mlx-whisper, pyannote,
   numpy beat tracker, FCP7-XML cutter
 - Distribution: signed .zxp + PyInstaller backend, assembled by `scripts/make_release.sh`
+  (macOS, see `docs/BUILD_MAC.md`) / `scripts/make_release_win.ps1` (Windows zip)
 
 ## Commands
 - Build backend: `scripts/build_backend_win.ps1` (Windows, venv `backend/venv-win`) /

@@ -54,3 +54,6 @@ backend/dist_backend/
 
 # Speaker model fetched by the build scripts (bundled into the backend)
 backend/models/
+
+# Release bundles assembled by scripts/make_release*.{sh,ps1}
+release/

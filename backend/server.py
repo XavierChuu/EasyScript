@@ -1508,56 +1508,21 @@ def _run_nllb_download(model_size: str):
         "detail": f"Downloading NLLB-200 {model_size} ({size_label})...",
     }
     try:
-        import sys
-        model_id = NLLBTranslator.MODELS.get(model_size, NLLBTranslator.MODELS["600M"])
-        cache_dir = NLLBTranslator.CACHE_DIR
-        os.makedirs(cache_dir, exist_ok=True)
-        bundled = getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None) is not None
-
-        def _is_benign_symlink_error(stderr_or_msg: str) -> bool:
-            return ("WinError 1314" in stderr_or_msg
-                    or "privilege is not held" in stderr_or_msg
-                    or "symlink" in stderr_or_msg.lower())
-
-        if bundled:
-            from huggingface_hub import snapshot_download
-            try:
-                snapshot_download(
-                    repo_id=model_id,
-                    cache_dir=cache_dir,
-                    ignore_patterns=["*.bin"],
-                )
-            except OSError as oe:
-                # On Windows without Developer Mode / admin, HF Hub fails when
-                # creating symlinks from snapshots → blobs. Model weights are
-                # usually already downloaded; verify via is_downloaded.
-                if _is_benign_symlink_error(str(oe)) and NLLBTranslator.is_downloaded(model_size):
-                    pass  # benign — model files are present
-                else:
-                    raise
-            nllb_download_progress = {"status": "done", "progress": 1.0,
-                                       "detail": f"NLLB-200 {model_size} ready"}
-        else:
-            result = subprocess.run(
-                [sys.executable, "-c",
-                 f"from huggingface_hub import snapshot_download; "
-                 f"snapshot_download(repo_id='{model_id}', cache_dir=r'{cache_dir}', ignore_patterns=['*.bin']);"
-                 f"print('done')"],
-                capture_output=True, text=True, timeout=3600,
-            )
-            if result.returncode == 0:
-                nllb_download_progress = {"status": "done", "progress": 1.0,
-                                           "detail": f"NLLB-200 {model_size} ready"}
-            elif _is_benign_symlink_error(result.stderr or "") and NLLBTranslator.is_downloaded(model_size):
-                # Windows symlink permission failure but weights are present
-                nllb_download_progress = {"status": "done", "progress": 1.0,
-                                           "detail": f"NLLB-200 {model_size} ready (symlinks skipped)"}
-            else:
-                nllb_download_progress = {"status": "error", "progress": 0.0,
-                                           "detail": result.stderr[-500:] or "Download failed"}
-    except subprocess.TimeoutExpired:
-        nllb_download_progress = {"status": "error", "progress": 0.0,
-                                   "detail": "Timeout after 1 hour"}
+        try:
+            NLLBTranslator.download(model_size)
+        except OSError as oe:
+            # Windows without Developer Mode can't create the HF cache symlinks;
+            # the weights themselves are usually in place.
+            msg = str(oe)
+            benign = "WinError 1314" in msg or "privilege is not held" in msg or "symlink" in msg.lower()
+            if not (benign and NLLBTranslator.is_downloaded(model_size)):
+                raise
+        # Convert for CTranslate2 and load it now, so the first translation is fast.
+        nllb_download_progress = {"status": "downloading", "progress": 0.9,
+                                  "detail": f"Optimizing NLLB-200 {model_size} for this computer..."}
+        _get_nllb_translator(model_size)._ensure_loaded()
+        nllb_download_progress = {"status": "done", "progress": 1.0,
+                                  "detail": f"NLLB-200 {model_size} ready"}
     except Exception as e:
         nllb_download_progress = {"status": "error", "progress": 0.0, "detail": str(e)}
 

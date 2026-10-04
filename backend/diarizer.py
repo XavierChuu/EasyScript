@@ -89,8 +89,11 @@ def _onnx_session(path):
 
 
 def detect_torch_device():
-    """Best torch device for pyannote."""
+    """Best torch device for pyannote (EASYSCRIPT_DIARIZE_DEVICE=cpu|cuda|mps overrides)."""
     import torch
+    forced = os.environ.get("EASYSCRIPT_DIARIZE_DEVICE", "").strip().lower()
+    if forced in ("cpu", "cuda", "mps"):
+        return forced
     if platform.system() == "Darwin" and platform.machine() == "arm64":
         if torch.backends.mps.is_available():
             return "mps"

@@ -27,62 +27,66 @@
 <body>
 
 <h1>EasyScript for Premiere Pro</h1>
-<p class="sub">Auto silence-cut · transcription · speaker labeling · subtitles — directly on your timeline. <b>Installation &amp; User Guide</b></p>
+<p class="sub">Silence cut · transcription · speaker labeling · subtitles · translation · beat markers — directly on your timeline. <b>Installation &amp; User Guide — version 2.2</b></p>
 
 <h2>1. Requirements</h2>
 <ul>
-  <li><b>Adobe Premiere Pro 2022 or newer</b> (macOS or Windows).</li>
-  <li>About <b>3&nbsp;GB</b> free disk space (the transcription model downloads on first use — needs internet).</li>
-  <li>Apple Silicon Macs (M1–M5) are fastest; Intel/Windows machines also work.</li>
+  <li><b>Adobe Premiere Pro 2022 or later</b> (macOS or Windows 10/11).</li>
+  <li>About <b>8&nbsp;GB</b> free: backend ~3&nbsp;GB, Turbo transcription model ~1.6&nbsp;GB (downloaded on first use), NLLB translation model ~3&nbsp;GB (only if used).</li>
+  <li>Fastest on Apple Silicon Macs or Windows PCs with an NVIDIA GPU. Computers without a GPU work too (slower).</li>
+  <li>Internet is needed the first time to download models. After that everything runs <b>offline on your computer</b>.</li>
 </ul>
 
 <h2>2. Installation</h2>
-<p>Your package contains: <code>EasyScript-Premiere.zxp</code>, a <code>backend/</code> folder, the installers, and this guide.</p>
+<p>The folder you received contains <code>EasyScript-Premiere.zxp</code>, a <code>backend/</code> folder, the installers and this guide.</p>
 
 <h3>macOS</h3>
 <ol>
-  <li><b>Fully quit Premiere</b> (Cmd&nbsp;+&nbsp;Q).</li>
-  <li>Right-click <code>install-mac.command</code> → <b>Open</b> → <b>Open</b> (macOS asks once on first run).</li>
-  <li>The script installs the panel and the backend automatically. Reopen Premiere when it finishes.</li>
+  <li><b>Quit Premiere completely</b> (Cmd&nbsp;+&nbsp;Q).</li>
+  <li>Right-click <code>install-mac.command</code> → <b>Open</b> → <b>Open</b> (macOS asks the first time).</li>
+  <li>The script enables extensions and installs the panel and backend. Then reopen Premiere.</li>
 </ol>
 
 <h3>Windows</h3>
 <ol>
-  <li><b>Fully quit Premiere.</b></li>
-  <li>Right-click <code>install-win.bat</code> → <b>Run as administrator</b>.</li>
-  <li>Reopen Premiere when it finishes.</li>
+  <li><b>Quit Premiere.</b></li>
+  <li>Double-click <code>install-win.bat</code> (if blocked: right-click → <b>Run as administrator</b>).</li>
+  <li>When it finishes, reopen Premiere.</li>
 </ol>
 
-<div class="box">Open the panel: <b>Window → Extensions → EasyScript</b>. On first open the panel <b>starts the backend automatically</b> (top corner shows <span class="pill">Connecting</span> → <span class="pill">Connected</span>). The first transcription downloads the model (needs internet, a few minutes).</div>
+<div class="box">Open the panel: <b>Window → Extensions → EasyScript</b>. The panel <b>starts the backend automatically</b> (top corner shows <span class="pill">Connecting</span> → <span class="pill">Connected</span>). The first transcription / translation downloads its model (needs internet, takes a few minutes).</div>
 
 <h2>3. Workflow</h2>
+<p>The panel has 3 tabs: <b>Cut</b> (silences), <b>Transcript</b> (transcription, speakers, subtitles, translation) and <b>Beats</b> (music beat markers).</p>
 <table>
   <tr><th>Step</th><th>Action</th></tr>
-  <tr><td><span class="step">1</span> Pick a source</td><td>Select a <b>clip</b> on the timeline (or set <b>In/Out</b> marks). <b>Range</b>: <i>Selected Clip</i> / <i>In&nbsp;/&nbsp;Out Points</i> / <i>Entire Timeline</i>.</td></tr>
-  <tr><td><span class="step">2</span> Load Audio</td><td>Click <b>Load Audio from Timeline</b> → the waveform appears (exactly the selected part, including trimmed clips and nested sequences).</td></tr>
-  <tr><td><span class="step">3</span> Detect Silence</td><td>Finds silent gaps. Click the ⚙ next to "Waveform" to tune sensitivity (padding, dB threshold, min silence).</td></tr>
-  <tr><td><span class="step">4</span> Transcribe</td><td>Speech to text. Pick the <b>Model</b> &amp; <b>Language</b> in Settings (⚙).</td></tr>
-  <tr><td><span class="step">5</span> Speakers</td><td>Identify who is speaking (needs an HF Token in Settings — see section 4).</td></tr>
-  <tr><td><span class="step">6</span> Apply Cut</td><td>Removes silence <b>directly on the timeline</b> (ripples clips closed and keeps audio/video in sync).</td></tr>
-  <tr><td><span class="step">7</span> Make Subtitle</td><td>Creates subtitles on the timeline. A dialog lets you pick the <b>original + any translations</b>. Line breaks follow the "Display mode" in Segments.</td></tr>
-  <tr><td><span class="step">8</span> Label Speaker</td><td>Cuts at speaker changes &amp; <b>renames each clip</b> to its speaker name.</td></tr>
+  <tr><td><span class="step">1</span> Source</td><td>Select a <b>clip</b> on the timeline (or set <b>In/Out</b>, or use the entire timeline) and click <b>Load audio</b>. Scroll to zoom the waveform, drag to pan, click to move the playhead.</td></tr>
+  <tr><td><span class="step">2</span> Detect silence</td><td><b>Cut</b> tab: find silences, tune padding / dB threshold / minimum length and preview them on the waveform.</td></tr>
+  <tr><td><span class="step">3</span> Cut</td><td><b>Apply cut</b> edits the timeline directly. <b>Cut to new sequence</b> builds a new, already-cut sequence in one step (recommended for long videos; the original stays untouched).</td></tr>
+  <tr><td><span class="step">4</span> Transcribe</td><td><b>Transcript</b> tab: pick the <b>Model</b> (default <b>Turbo</b> — accurate and fast) and <b>Language</b>. <b>Vocabulary</b>: type names, brands or terms so they are recognised correctly.</td></tr>
+  <tr><td><span class="step">5</span> Speakers</td><td>Identify who is speaking — <b>no account or token needed</b>. Lines where two people talk are split at the right word. Click a speaker tag to <b>rename</b>, <b>move the line to another speaker</b> or create a new one; giving two speakers the same name merges them.</td></tr>
+  <tr><td><span class="step">6</span> Voices</td><td>When you rename a speaker (e.g. "Speaker A" → "Lan") their voice is saved; in later videos that person is <b>recognised automatically</b> (✓ next to the name). Manage saved voices in Settings.</td></tr>
+  <tr><td><span class="step">7</span> Tag speaker</td><td>Cuts clips where the speaker changes and names / colours each clip per speaker. <b>New sequence — exact</b>: builds a new sequence, frame-exact, music / B-roll untouched. <b>In place</b>: edits the open sequence.</td></tr>
+  <tr><td><span class="step">8</span> Subtitles</td><td><b>Make subtitle</b> creates captions on the timeline (original + translations). <b>Export SRT</b> saves a file. Line breaks follow the Segments "Display mode", timed by word.</td></tr>
+  <tr><td><span class="step">9</span> Translate</td><td>Segments → <b>Translation</b> tab: add target languages and click Translate. Choose the translator in Settings (NLLB-200 offline, Ollama, Hy-MT2 or Claude API).</td></tr>
+  <tr><td><span class="step">10</span> Beats</td><td><b>Beats</b> tab: detect the beat, choose marker spacing (1/4 beat → 4 bars), preview on the waveform, then add markers to the clip or the timeline.</td></tr>
 </table>
 
 <h2>4. Settings (⚙ button)</h2>
 <ul>
-  <li><b>Model / Language</b>: choose the transcription model and language.</li>
-  <li><b>Speakers — HF Token</b>: a free HuggingFace token is required for speaker identification. Get one at <code>huggingface.co/settings/tokens</code> and <b>accept the terms</b> of both models: <code>pyannote/speaker-diarization-3.1</code> and <code>pyannote/segmentation-3.0</code>.</li>
-  <li><b>Translation</b>: choose a translation provider (NLLB-200 / Ollama / Hy-MT2 / Claude API). Download the local model in Settings if using a local provider.</li>
-  <li><b>Subtitle timing</b>: subtitles timed <i>after the cut</i> or <i>to the original</i>.</li>
+  <li><b>Export folder</b>: where SRT / XML files are saved.</li>
+  <li><b>Speakers</b>: saved voices (delete any of them). "Speaker options" in the Transcript tab: known number of speakers, sensitivity, speed, recognise saved voices.</li>
+  <li><b>Translation</b>: choose the translator. <b>NLLB-200</b> runs offline: click <b>Download</b> once (~2.4&nbsp;GB, then it optimises itself for your computer); Ollama / Hy-MT2 run locally; Claude API needs an API key.</li>
 </ul>
 
 <h2>5. Troubleshooting</h2>
 <table>
   <tr><th>Symptom</th><th>Fix</th></tr>
-  <tr><td>"EasyScript" not in Extensions</td><td>Run the installer again, then <b>fully quit &amp; reopen Premiere</b>.</td></tr>
-  <tr><td>Panel stays <b>Offline</b></td><td>The backend isn't up. Reopen the panel (it auto-starts the backend). The first run may take a few minutes to download the model.</td></tr>
-  <tr><td>Speakers shows a token error</td><td>Enter your HF Token &amp; accept the two pyannote model terms (section 4), then Save Settings.</td></tr>
-  <tr><td>Nested audio sounds empty</td><td>Make sure the sequence has audio; try again — the render is auto-normalized.</td></tr>
+  <tr><td>"EasyScript" missing from Extensions</td><td>Run the installer again, then <b>quit &amp; reopen Premiere</b>.</td></tr>
+  <tr><td>Panel stays <b>Offline</b></td><td>The backend isn't running. Close and reopen the panel (it starts the backend). The first start can take a few minutes.</td></tr>
+  <tr><td>First Speakers run is slow</td><td>Normal: the model loads the first time (~10–20 s). Later runs are fast.</td></tr>
+  <tr><td>First transcription / translation is slow</td><td>The model is downloading (needs internet). Only once.</td></tr>
+  <tr><td>Wrong number of speakers</td><td>Set <b>Known speakers</b> or change <b>Sensitivity</b> in "Speaker options"; fix lines by clicking the speaker tag.</td></tr>
 </table>
 
 <div class="box warn"><b>Note:</b> EasyScript never modifies your source files. All cuts/renames apply to clips on the timeline — you can Undo (Cmd/Ctrl&nbsp;+&nbsp;Z) at any time.</div>

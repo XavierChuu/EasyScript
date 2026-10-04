@@ -78,6 +78,10 @@ def main():
     except OSError:
         pass
     os.environ.setdefault("MPLBACKEND", "Agg")
+    # macOS: pyannote runs on Metal (MPS); ops MPS lacks fall back to the CPU
+    # instead of raising.
+    if sys.platform == "darwin":
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     port = int(os.environ.get("PORT", "9876"))
 
     if getattr(sys, "_MEIPASS", None):

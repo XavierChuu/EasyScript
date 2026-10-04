@@ -98,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_backend_win.ps1
 ./scripts/build_backend_mac.sh
 ```
 
-Output: `backend/dist_backend/EasyScript-backend/`. Package the panel with `cep-extension-v2.1/package_zxp.ps1 -ZxpSign <ZXPSignCmd.exe>` (or `package_zxp.sh`). The signing certificate and ZXPSignCmd stay out of git.
+Output: `backend/dist_backend/EasyScript-backend/`. Step-by-step macOS build and release: [docs/BUILD_MAC.md](docs/BUILD_MAC.md). Windows release zip (panel + backend + guides): `scripts/make_release_win.ps1`. Package the panel with `cep-extension-v2.1/package_zxp.ps1 -ZxpSign <ZXPSignCmd.exe>` (or `package_zxp.sh`). The signing certificate and ZXPSignCmd stay out of git.
 
 ### Tests
 
