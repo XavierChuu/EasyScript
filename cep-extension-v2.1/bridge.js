@@ -60,17 +60,19 @@
       return esJson("esImportSequenceXML('" + q(path) + "','" + q(expectName || "") + "')");
     },
     // Add markers in batches so a long beat grid never blocks Premiere for long.
-    // target: "sequence" | "clip"; items: [{t, name, comment, color}].
+    // target: "sequence" | "clip"; items: [{t (sequence seconds), name, comment, color}].
+    // clip {nodeId, seqStart}: used when nothing is selected in the timeline.
     addMarkers: function (target, clip, items, onProgress, isCancelled) {
-      var BATCH = 200, i = 0, added = 0, errors = 0;
+      var BATCH = 200, i = 0, added = 0, errors = 0, skipped = 0, clipName = "";
       function next() {
         if (i >= items.length || (isCancelled && isCancelled())) {
-          return Promise.resolve({ added: added, errors: errors, cancelled: i < items.length });
+          return Promise.resolve({ added: added, errors: errors, skipped: skipped, clipName: clipName, cancelled: i < items.length });
         }
         var chunk = items.slice(i, i + BATCH);
         var j = q(JSON.stringify({ target: target, clip: clip || {}, items: chunk }));
         return esJson("esAddMarkers('" + j + "')").then(function (r) {
-          added += r.added || 0; errors += r.errors || 0; i += chunk.length;
+          added += r.added || 0; errors += r.errors || 0; skipped += r.skipped || 0; i += chunk.length;
+          clipName = r.clipName || clipName;
           try { if (onProgress) onProgress(i / items.length, i, items.length); } catch (e) {}
           return delay(10).then(next);
         });

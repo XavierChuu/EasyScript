@@ -1066,7 +1066,8 @@ function esPlaceStem(dataJson) {
             } catch (e2) {}
         }
         if (!placed) return JSON.stringify({ ok: false, error: "The stem was imported but not found on A" + (ti + 1) + " at the expected time." });
-        return JSON.stringify({ ok: true, track: ti, startTicks: String(placed.start.ticks), name: item.name });
+        return JSON.stringify({ ok: true, track: ti, startTicks: String(placed.start.ticks), name: item.name,
+                                nodeId: String(item.nodeId) });
     } catch (e) {
         return JSON.stringify({ ok: false, error: e.message });
     }
@@ -1120,7 +1121,9 @@ function esImportSequenceXML(xmlPath, expectName) {
 }
 
 /** Project item of the analysed clip: same nodeId, starting where it started. */
-function _findClipProjectItem(seq, info) {
+/** Timeline clip (TrackItem) of `info` {nodeId, seqStart}: the one starting at
+ *  seqStart, else any clip of that media. */
+function _findClipByNode(seq, info) {
     var groups = [seq.audioTracks, seq.videoTracks], fallback = null;
     for (var g = 0; g < groups.length; g++) {
         for (var t = 0; t < groups[g].numTracks; t++) {
@@ -1131,40 +1134,73 @@ function _findClipProjectItem(seq, info) {
                 if (!pi || String(pi.nodeId) !== String(info.nodeId)) continue;
                 var st = 0;
                 try { st = clips[c].start.seconds; } catch (e2) {}
-                if (Math.abs(st - (info.seqStart || 0)) < 0.01) return pi;
-                if (!fallback) fallback = pi;
+                if (Math.abs(st - (info.seqStart || 0)) < 0.01) return clips[c];
+                if (!fallback) fallback = clips[c];
             }
         }
     }
     return fallback;
 }
 
-function _markerCollection(seq, data) {
-    if (data.target === "clip") {
-        var pi = _findClipProjectItem(seq, data.clip || {});
-        if (!pi) return null;
-        return pi.getMarkers();
+/** The clip selected in the timeline (an audio clip preferred), or null. */
+function _selectedClip(seq) {
+    var sel = null, pick = null;
+    try { sel = seq.getSelection(); } catch (e) {}
+    if (!sel || !sel.length) return null;
+    for (var i = 0; i < sel.length; i++) {
+        var pi = null;
+        try { pi = sel[i].projectItem; } catch (e2) {}
+        if (!pi) continue;
+        var audio = false;
+        try { audio = String(sel[i].mediaType) === "Audio"; } catch (e3) {}
+        if (audio) return sel[i];
+        if (!pick) pick = sel[i];
     }
-    return seq.markers;
+    return pick;
+}
+
+/**
+ * Where markers go. Sequence target: the sequence's markers. Clip target: the
+ * media of the clip selected in the timeline — or, with nothing selected, the
+ * clip of the panel's current audio (data.clip {nodeId, seqStart}).
+ * Returns {coll, clip} (clip = TrackItem for clip targets) or null.
+ */
+function _markerTarget(seq, data) {
+    if (data.target !== "clip") return { coll: seq.markers, clip: null };
+    var clip = _selectedClip(seq) || (data.clip && data.clip.nodeId ? _findClipByNode(seq, data.clip) : null);
+    if (!clip) return null;
+    return { coll: clip.projectItem.getMarkers(), clip: clip };
 }
 
 /**
  * Add markers. dataJson: {target:"sequence"|"clip", clip:{nodeId, seqStart},
- *   items:[{t (s), name, comment, color (0-7)}]}. Sequence markers take
- *   sequence time; clip markers take source time of the clip's media.
- * Returns JSON {ok, added, errors}.
+ *   items:[{t (sequence seconds), name, comment, color (0-7)}]}. Clip markers
+ *   are converted to the clip's source time (so they move with the clip);
+ *   ones outside the clip's visible range are skipped.
+ * Returns JSON {ok, added, errors, skipped, clipName}.
  */
 function esAddMarkers(dataJson) {
     try {
         var data = JSON.parse(dataJson);
         var seq = app.project.activeSequence;
         if (!seq) return JSON.stringify({ ok: false, error: "No active sequence" });
-        var coll = _markerCollection(seq, data);
-        if (!coll) return JSON.stringify({ ok: false, error: "The analysed clip is no longer on the timeline" });
-        var items = data.items || [], added = 0, errors = 0;
+        var tgt = _markerTarget(seq, data);
+        if (!tgt) return JSON.stringify({ ok: false, error: "Select the clip to mark in the timeline" });
+        var coll = tgt.coll, clip = tgt.clip;
+        var cStart = 0, cEnd = 0, cIn = 0, clipName = "";
+        if (clip) {
+            cStart = clip.start.seconds; cEnd = clip.end.seconds; cIn = clip.inPoint.seconds;
+            try { clipName = clip.name; } catch (e0) {}
+        }
+        var items = data.items || [], added = 0, errors = 0, skipped = 0;
         for (var i = 0; i < items.length; i++) {
             try {
-                var m = coll.createMarker(Number(items[i].t));
+                var t = Number(items[i].t);
+                if (clip) {
+                    if (t < cStart - 0.0005 || t > cEnd + 0.0005) { skipped++; continue; }
+                    t = cIn + (t - cStart);
+                }
+                var m = coll.createMarker(t);
                 if (items[i].name) m.name = items[i].name;
                 if (items[i].comment) m.comments = items[i].comment;
                 if (items[i].color !== undefined && items[i].color !== null) {
@@ -1173,7 +1209,7 @@ function esAddMarkers(dataJson) {
                 added++;
             } catch (e) { errors++; }
         }
-        return JSON.stringify({ ok: true, added: added, errors: errors });
+        return JSON.stringify({ ok: true, added: added, errors: errors, skipped: skipped, clipName: clipName });
     } catch (e) {
         return JSON.stringify({ ok: false, error: e.message });
     }
@@ -1188,8 +1224,9 @@ function esClearMarkers(dataJson) {
         var data = JSON.parse(dataJson);
         var seq = app.project.activeSequence;
         if (!seq) return JSON.stringify({ ok: false, error: "No active sequence" });
-        var coll = _markerCollection(seq, data);
-        if (!coll) return JSON.stringify({ ok: false, error: "The analysed clip is no longer on the timeline" });
+        var tgt = _markerTarget(seq, data);
+        if (!tgt) return JSON.stringify({ ok: false, error: "Select the clip in the timeline" });
+        var coll = tgt.coll;
         var tag = String(data.tag || "EasyScript"), doomed = [];
         var m = coll.getFirstMarker();
         while (m) {
@@ -1199,7 +1236,9 @@ function esClearMarkers(dataJson) {
             m = coll.getNextMarker(m);
         }
         for (var i = 0; i < doomed.length; i++) { try { coll.deleteMarker(doomed[i]); } catch (e2) {} }
-        return JSON.stringify({ ok: true, removed: doomed.length });
+        var clipName = "";
+        try { if (tgt.clip) clipName = tgt.clip.name; } catch (e3) {}
+        return JSON.stringify({ ok: true, removed: doomed.length, clipName: clipName });
     } catch (e) {
         return JSON.stringify({ ok: false, error: e.message });
     }

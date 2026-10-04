@@ -27,6 +27,7 @@
     stems: null,      // {vocals, music, duration, device}
     active: "original",
     busy: false,
+    placed: {},       // stem → {nodeId, seqStart} of its clip once imported to the timeline
   };
 
   function $(id) { return document.getElementById(id); }
@@ -62,6 +63,7 @@
     state.original = originalPath || "";
     state.stems = null;
     state.active = "original";
+    state.placed = {};
     var choice = $("stemChoice");
     if (choice) choice.classList.add("hidden");
     render();
@@ -169,6 +171,7 @@
         : frameToTicks(secToFrameRound(info.seqStart || 0, tb), tb);
       var durTicks = Math.round((state.stems.duration || info.duration || 0) * TICKS);
       var r = await bridge.placeStem(copy.path, startTicks, durTicks);
+      state.placed[which] = { nodeId: r.nodeId, seqStart: (Number(r.startTicks) || 0) / TICKS };
       var at = formatTime((Number(r.startTicks) || 0) / TICKS);
       showStatus("Imported “" + r.name + "” to A" + (r.track + 1) + " at " + at +
         (r.addedTrack ? " (new track — the others had audio there)" : ""), false, "DONE");
@@ -192,5 +195,15 @@
     render();
   }
 
-  global.stemUI = { init: init, reset: reset, render: render, state: state };
+  /** Timeline clip of the audio the panel is using — the imported stem when
+   *  Voice / Music is active and was imported, else the loaded clip. Clip
+   *  markers fall back to it when nothing is selected in the timeline. */
+  function markerClip() {
+    var placed = state.active !== "original" && state.placed[state.active];
+    if (placed) return placed;
+    var info = loadedClipInfo || {};
+    return { nodeId: info.nodeId || "", seqStart: info.seqStart || 0 };
+  }
+
+  global.stemUI = { init: init, reset: reset, render: render, markerClip: markerClip, state: state };
 })(window);

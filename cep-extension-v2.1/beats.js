@@ -4,7 +4,8 @@
  * Detect beats on the backend (/beats job), derive the marker grid here
  * (subdivision, meter, downbeat offset, half/double tempo), review it on the
  * waveform (exclude/add markers, optional click track while playing), then add
- * the markers to the sequence or to the analysed clip in Premiere.
+ * the markers to the sequence or to a clip in Premiere (the one selected in the
+ * timeline, else the clip of the audio loaded here — e.g. an imported stem).
  *
  * Markers EasyScript adds carry TAG in their comment, so "Remove" only ever
  * deletes ours.
@@ -135,15 +136,11 @@
     ["beatApplyBtn", "beatResetBtn"].forEach(function (id) { if ($(id)) $(id).disabled = !hasBeats || !active; });
     if ($("beatApplyBtn") && hasBeats) $("beatApplyBtn").textContent = "Add " + active + " marker" + (active === 1 ? "" : "s");
     if ($("beatApplyBtn") && !hasBeats) $("beatApplyBtn").textContent = "Add markers";
-    var clipOk = !!(loadedClipInfo && loadedClipInfo.nodeId && !loadedClipInfo.nested && loadedClipInfo.sourceMode === "selected");
     var clipRadio = document.querySelector('input[name="beatTarget"][value="clip"]');
-    if (clipRadio) {
-      clipRadio.disabled = !clipOk;
-      if (!clipOk && clipRadio.checked) document.querySelector('input[name="beatTarget"][value="sequence"]').checked = true;
-      var lbl = $("beatClipLabel");
-      if (lbl) lbl.title = clipOk ? "Markers on the clip's source media — they move with the clip"
-        : "Available when a single clip was loaded (Range: Selected clip)";
-    }
+    var lbl = $("beatClipLabel");
+    if (lbl) lbl.title = "Markers on the clip selected in the timeline (with nothing selected: the clip of " +
+      "the audio loaded here, e.g. an imported Voice / Music stem). They sit on the clip's media and move with it.";
+    if (clipRadio) clipRadio.disabled = !loadedClipInfo;
   }
 
   function target() {
@@ -213,7 +210,6 @@
     if (!active.length) return;
     if (!global.bridge || !bridge.available()) { showStatus("Not running inside Premiere Pro.", true); return; }
     var tgt = target();
-    var info = loadedClipInfo || {};
     var btn = $("beatApplyBtn");
     var label = btn.textContent;
     btn.disabled = true;
@@ -227,20 +223,20 @@
       var color = parseInt($("beatColor").value, 10), down = parseInt($("beatDownColor").value, 10);
       var bpmTxt = (Math.round(state.bpm * state.tempo * 10) / 10) + " BPM";
       var items = active.map(function (m) {
-        // Sequence markers: timeline time, on a frame. Clip markers: the clip's source time.
-        var t = tgt === "clip"
-          ? (info.srcIn || 0) + m.t
-          : frameToSec(secToFrameRound(analysisToSeqTime(m.t), tb), tb);
+        // Timeline time on a frame; for clip markers Premiere's side converts it
+        // to the source time of whichever clip is the target.
+        var t = frameToSec(secToFrameRound(analysisToSeqTime(m.t), tb), tb);
         return { t: t, name: m.label, comment: TAG + " · " + bpmTxt,
                  color: m.kind === "down" || m.kind === "manual" ? down : color };
       });
-      var res = await bridge.addMarkers(tgt, { nodeId: info.nodeId, seqStart: info.seqStart || 0 }, items,
+      var res = await bridge.addMarkers(tgt, stemUI.markerClip(), items,
         function (p, done, total) { progressTracker.update(p, "markers", "Adding markers… " + done + "/" + total); },
         function () { return cancelled; });
       progressTracker.update(1, "done", "Added " + res.added + " markers");
-      showStatus((res.cancelled ? "Stopped — " : "") + "Added " + res.added + " " +
-        (tgt === "clip" ? "clip" : "sequence") + " markers" + (res.errors ? " (" + res.errors + " failed)" : ""),
-        false, "DONE");
+      showStatus((res.cancelled ? "Stopped — " : "") + "Added " + res.added +
+        (tgt === "clip" ? " clip markers" + (res.clipName ? " to “" + res.clipName + "”" : "") : " sequence markers") +
+        (res.skipped ? " (" + res.skipped + " outside the clip skipped)" : "") +
+        (res.errors ? " (" + res.errors + " failed)" : ""), false, "DONE");
     } catch (err) {
       showStatus("Adding markers failed: " + err.message, true);
     } finally {
@@ -252,12 +248,11 @@
 
   async function clearMarkers() {
     if (!global.bridge || !bridge.available()) { showStatus("Not running inside Premiere Pro.", true); return; }
-    var info = loadedClipInfo || {};
     try {
       var tgt = target();
-      var r = await bridge.clearMarkers(tgt, { nodeId: info.nodeId, seqStart: info.seqStart || 0 }, TAG);
-      showStatus("Removed " + (r.removed || 0) + " EasyScript beat markers from the " +
-        (tgt === "clip" ? "clip" : "sequence"), false, "DONE");
+      var r = await bridge.clearMarkers(tgt, stemUI.markerClip(), TAG);
+      showStatus("Removed " + (r.removed || 0) + " EasyScript beat markers from " +
+        (tgt === "clip" ? (r.clipName ? "“" + r.clipName + "”" : "the clip") : "the sequence"), false, "DONE");
     } catch (err) {
       showStatus("Removing markers failed: " + err.message, true);
     }
