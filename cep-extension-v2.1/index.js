@@ -474,7 +474,10 @@ const progressTracker = {
     this._onPartial = onPartial || null;
     this._onCancel = onCancel || null;
     this._cancelled = false;
-    this._seenProcessing = false; // Must see "processing" before accepting "done"
+    // Must see "processing" before accepting "done" — except for id-addressed
+    // /jobs/<id>, which can't report a previous run (and may finish before the
+    // first poll, e.g. cached stems).
+    this._seenProcessing = this.endpoint.indexOf("/jobs/") === 0;
     return new Promise((resolve, reject) => {
       this._resolvePolling = resolve;
       this._rejectPolling = reject;
@@ -2654,6 +2657,7 @@ function updateActionButtons() {
       b.disabled = !backendConnected || !hasInput;
     }
   });
+  stemUI.render();
 }
 
 // ── Workflow tabs (Cut · Transcript · Beats) ──
@@ -2715,6 +2719,7 @@ initSettings();
 initSegmentSettings();
 restorePrefs();
 beatUI.init();
+stemUI.init();
 updateExportButtons();   // Apply / XML / subtitle buttons stay off until there is something to apply
 updateActionButtons();
 {
@@ -2804,11 +2809,12 @@ async function loadAudioFromTimeline() {
     // {path, nested, name, start, end, inPoint, outPoint, fps, ticksPerFrame, nodeId, sequenceID}
     const clip = await bridge.getSelectedClip(mode, trackIdx);
     resetAnalysisState();  // clear previous audio's segments + waveform immediately
+    stemUI.reset("");
     if (clip.ticksPerFrame > 0) seqTimebase = { tpf: clip.ticksPerFrame, fps: clip.fps, sequenceID: clip.sequenceID };
     lastAppliedFps = clip.fps || 25;
 
     const clipDuration = Math.max(0, (clip.end || 0) - (clip.start || 0));
-    let analyzePath, analyzeDur, seqStart;
+    let analyzePath, analyzeDur, seqStart, seqStartTicks;
 
     // Render the actual timeline output when: timeline In/Out, Entire sequence,
     // or a nested sequence (no source file). Otherwise (a plain trimmed clip)
@@ -2820,6 +2826,7 @@ async function loadAudioFromTimeline() {
       console.log("[EasyScript] render:", r);
       if (!r || !r.path) throw new Error("Render failed: " + ((r && (r.error || r.log)) || "unknown"));
       seqStart = (typeof r.start === "number") ? r.start : 0;
+      seqStartTicks = frameToTicks(secToFrameRound(seqStart));
       analyzeDur = (r.end > r.start) ? (r.end - r.start) : 0; // 0 → resolved from /waveform
       // Premiere's render is often quiet → normalize so silence detection works.
       analyzePath = r.path;
@@ -2835,6 +2842,7 @@ async function loadAudioFromTimeline() {
       const srcStart = clip.inPoint || 0;
       const srcEnd = srcStart + clipDuration;
       analyzePath = clip.path; analyzeDur = clipDuration; seqStart = clip.start || 0;
+      seqStartTicks = Number(clip.startTicks) || frameToTicks(secToFrameRound(seqStart));
       try {
         const tr = await fetchBackend("/trim", {
           method: "POST",
@@ -2859,12 +2867,16 @@ async function loadAudioFromTimeline() {
       nested: !!clip.nested,
       sequenceID: clip.sequenceID || "",
       sourcePath: useRender ? "" : (clip.path || ""),
+      // Exact timeline position, and the range to render again (full quality)
+      // for voice / music separation.
+      seqStartTicks, renderStart: clip.start || 0, renderEnd: clip.end || 0,
     };
     waveform.setFrameRate(seqTimebase.fps);
 
     const modeLabel = { entire: "entire sequence", inout: "in/out", selected: "selected clip" }[mode] || mode;
     showStatus(`${clip.name}${analyzeDur > 0 ? " · " + formatTime(analyzeDur) : ""} · ${modeLabel}`, false, "LOADED");
     audioPlayback.loadAudio(analyzePath);
+    stemUI.reset(analyzePath);
     updateActionButtons();
     beatUI.render();
     await loadWaveformPeaks(analyzePath, analyzeDur);

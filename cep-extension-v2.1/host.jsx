@@ -966,6 +966,112 @@ function esImportSubtitle(srtPath, startSec) {
     }
 }
 
+/** Child bin of the project root called `name` (created when missing). */
+function _rootBin(name) {
+    var kids = app.project.rootItem.children;
+    for (var i = 0; i < kids.numItems; i++) {
+        try { if (kids[i].type === ProjectItemType.BIN && kids[i].name === name) return kids[i]; } catch (e) {}
+    }
+    return app.project.rootItem.createBin(name);
+}
+
+/** Item in `bin` whose media path is `path`, or null. */
+function _findItemInBin(bin, path) {
+    var want = new File(path).fsName.toLowerCase();
+    for (var i = bin.children.numItems - 1; i >= 0; i--) {
+        var it = bin.children[i], mp = "";
+        try { mp = it.getMediaPath(); } catch (e) {}
+        if (mp && new File(mp).fsName.toLowerCase() === want) return it;
+    }
+    return null;
+}
+
+/**
+ * First unlocked audio track with no clip overlapping [start, end) ticks, or -1.
+ * Clips that merely touch the range (end == start) don't count.
+ */
+function _freeAudioTrack(seq, startTicks, endTicks) {
+    var tracks = seq.audioTracks;
+    for (var i = 0; i < tracks.numTracks; i++) {
+        var t = tracks[i], locked = false;
+        try { locked = t.isLocked(); } catch (e) {}
+        if (locked) continue;
+        var busy = false;
+        for (var c = 0; c < t.clips.numItems && !busy; c++) {
+            var cl = t.clips[c];
+            busy = parseFloat(cl.start.ticks) < endTicks && parseFloat(cl.end.ticks) > startTicks;
+        }
+        if (!busy) return i;
+    }
+    return -1;
+}
+
+/** Append one stereo audio track (QE DOM). A separate evalScript call from
+ *  esPlaceStem: the regular DOM only sees the new track in the next call. */
+function esAddAudioTrack() {
+    try {
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ ok: false, error: "No active sequence" });
+        var before = seq.audioTracks.numTracks;
+        app.enableQE();
+        // (videoTracks, afterVideo, audioTracks, audioType 0 mono / 1 stereo / 2 5.1,
+        //  afterAudio, submixTracks, submixType)
+        qe.project.getActiveSequence().addTracks(0, 0, 1, 1, before, 0, 1);
+        return JSON.stringify({ ok: true, before: before });
+    } catch (e) {
+        return JSON.stringify({ ok: false, error: "Could not add an audio track: " + e.message });
+    }
+}
+
+/**
+ * Import a separated stem (into the "EasyScript Stems" bin) and lay it at
+ * `startTicks` on the first audio track that is empty for its whole length —
+ * never over existing audio. When every track is busy it returns
+ * {ok:false, needTrack:true}; the panel then calls esAddAudioTrack and retries.
+ * data: {path, startTicks, durationTicks}
+ * Returns JSON {ok, track, startTicks, name}.
+ */
+function esPlaceStem(dataJson) {
+    try {
+        var d = JSON.parse(dataJson);
+        var seq = app.project.activeSequence;
+        if (!seq) return JSON.stringify({ ok: false, error: "No active sequence — open a sequence first." });
+        var start = parseFloat(d.startTicks) || 0;
+        var end = start + (parseFloat(d.durationTicks) || 0);
+
+        var ti = _freeAudioTrack(seq, start, end);
+        if (ti < 0) return JSON.stringify({ ok: false, needTrack: true, tracks: seq.audioTracks.numTracks });
+
+        var bin = _rootBin("EasyScript Stems");
+        var item = _findItemInBin(bin, d.path);
+        if (!item) {
+            app.project.importFiles([d.path], true, bin, false);
+            item = _findItemInBin(bin, d.path);
+        }
+        if (!item) return JSON.stringify({ ok: false, error: "Import failed: " + d.path });
+
+        var track = seq.audioTracks[ti];
+        var at = new Time();
+        at.ticks = String(Math.round(start));
+        try { track.overwriteClip(item, at); }
+        catch (e1) { track.overwriteClip(item, String(Math.round(start))); }
+
+        // Confirm where it landed (within one frame).
+        var tpf = _seqTicksPerFrame(seq), placed = null;
+        for (var c = 0; c < track.clips.numItems; c++) {
+            var cl = track.clips[c];
+            try {
+                if (String(cl.projectItem.nodeId) === String(item.nodeId) &&
+                    Math.abs(parseFloat(cl.start.ticks) - start) < tpf) { placed = cl; break; }
+            } catch (e2) {}
+        }
+        if (!placed) return JSON.stringify({ ok: false, error: "The stem was imported but not found on A" + (ti + 1) + " at the expected time." });
+        return JSON.stringify({ ok: true, track: ti, startTicks: String(placed.start.ticks), name: item.name });
+    } catch (e) {
+        return JSON.stringify({ ok: false, error: e.message });
+    }
+}
+
 /**
  * Export the active sequence as FCP XML into ~/.easyscript/xml.
  * Returns JSON {ok, path, name, sequenceID, ticksPerFrame}.

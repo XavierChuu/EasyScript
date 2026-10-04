@@ -31,6 +31,7 @@ import security
 import waveform as waveform_data
 import beat_tracker
 import xml_cut
+import separator as stem_separator
 
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "easyscript_uploads")
 WAVEFORM_CACHE_DIR = os.path.join(UPLOAD_DIR, "_waveform")
@@ -547,6 +548,135 @@ def detect_beats(req: BeatsRequest):
     return {"job_id": job["id"]}
 
 
+# ── Voice / music separation (stems) ──
+# Both stems come out of one run and are cached per source range in
+# STEMS_DIR, so switching between "voice only" and "music only" is instant.
+# Imported stems are copied to the export folder first: the cache gets pruned,
+# a Premiere project must never point into it.
+
+STEMS_DIR = os.path.join(os.path.expanduser("~"), ".easyscript", "stems")
+STEMS_KEEP_DAYS = 7
+_separator = None
+_separator_lock = threading.Lock()
+
+
+class SeparateRequest(BaseModel):
+    audio_path: str
+    start: float = 0.0       # source range in seconds; end <= start = to the end
+    end: float = 0.0
+
+
+class StemExportRequest(BaseModel):
+    path: str                # vocals.wav / music.wav from a /separate result
+    name: str                # file name without extension, e.g. "Interview - Voice"
+
+
+def _stems_key(path, start, duration):
+    import hashlib
+    st = os.stat(path)
+    raw = f"{os.path.abspath(path)}|{st.st_size}|{int(st.st_mtime)}|{start:.4f}|{duration:.4f}|{stem_separator.MODEL_FILE}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _prune_stems():
+    cutoff = _time_module.time() - STEMS_KEEP_DAYS * 86400
+    try:
+        for d in os.listdir(STEMS_DIR):
+            p = os.path.join(STEMS_DIR, d)
+            if os.path.isdir(p) and os.path.getmtime(p) < cutoff:
+                shutil.rmtree(p, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def _separate_cached(audio_path, start, dur, report, cancelled):
+    """Stems of [start, start+dur) of audio_path (dur 0 = to the end), from the
+    cache or a fresh run. report(p, detail) gets 0..1. Returns (vocals, music, cached)."""
+    global _separator
+    src = ensure_accessible(audio_path)
+    os.makedirs(STEMS_DIR, exist_ok=True)
+    final = os.path.join(STEMS_DIR, _stems_key(audio_path, start, dur))
+    vocals, music = os.path.join(final, "vocals.wav"), os.path.join(final, "music.wav")
+    if os.path.isfile(vocals) and os.path.isfile(music):
+        os.utime(final)       # keep it from being pruned
+        return vocals, music, True
+    _prune_stems()
+    if not stem_separator.is_downloaded():
+        total_mb = stem_separator.MODEL_BYTES / 2**20
+        stem_separator.download(
+            progress=lambda done, total: report(
+                0.25 * done / total,
+                f"Downloading the separation model (one time)… {done / 2**20:.0f} / {total_mb:.0f} MB"),
+            cancelled=cancelled)
+    with _separator_lock:
+        if _separator is None:
+            report(0.26, "Loading the separation model…")
+            _separator = stem_separator.Separator(progress=lambda d: report(0.27, d))
+        tmp = final + ".tmp"
+        shutil.rmtree(tmp, ignore_errors=True)
+        _separator.separate(src, tmp, start=start, duration=dur,
+                            progress=lambda p, d: report(0.28 + 0.72 * p, d),
+                            cancelled=cancelled)
+        shutil.rmtree(final, ignore_errors=True)
+        os.replace(tmp, final)
+    return vocals, music, False
+
+
+def _run_separate_worker(job, req):
+    try:
+        report = _job_progress(job)
+        start = max(0.0, float(req.start or 0.0))
+        dur = (float(req.end) - start) if req.end and req.end > start else 0.0
+        vocals, music, cached = _separate_cached(req.audio_path, start, dur, report,
+                                                 lambda: bool(job.get("cancel")))
+        duration = get_audio_duration(vocals) or 0.0
+        job.update({"status": "done", "progress": 1.0, "stage": "done",
+                    "detail": "Voice and music separated" + (" (cached)" if cached else ""),
+                    "result": {"vocals": vocals, "music": music, "duration": round(duration, 3),
+                               "device": _separator.label if _separator else "", "cached": cached}})
+    except (JobCancelled, stem_separator.SeparationCancelled):
+        job.update({"status": "error", "stage": "error", "detail": "Cancelled"})
+    except Exception as e:
+        print(f"[separate] {type(e).__name__}: {e}")
+        job.update({"status": "error", "stage": "error", "detail": f"Separation failed: {e}"})
+
+
+@app.get("/separate/status")
+def separate_status():
+    return {"downloaded": stem_separator.is_downloaded(),
+            "model_mb": round(stem_separator.MODEL_BYTES / 2**20),
+            "loaded": _separator is not None,
+            "device": _separator.label if _separator else ""}
+
+
+@app.post("/separate")
+def separate_stems(req: SeparateRequest):
+    if not os.path.isfile(req.audio_path):
+        return JSONResponse(status_code=400, content={"error": "File not found"})
+    job = _new_job("separate")
+    threading.Thread(target=_run_separate_worker, args=(job, req), daemon=True).start()
+    return {"job_id": job["id"]}
+
+
+@app.post("/separate/export")
+def export_stem(req: StemExportRequest):
+    """Copy a cached stem into <export folder>/EasyScript Stems for importing."""
+    src = os.path.abspath(req.path)
+    if os.path.commonpath([src, os.path.abspath(STEMS_DIR)]) != os.path.abspath(STEMS_DIR) \
+            or not os.path.isfile(src):
+        return JSONResponse(status_code=400, content={"error": "Not a separated stem"})
+    folder = os.path.join(export_dir, "EasyScript Stems")
+    os.makedirs(folder, exist_ok=True)
+    base = xml_cut.safe_filename(req.name, "Stem")
+    dst = os.path.join(folder, base + ".wav")
+    n = 2
+    while os.path.exists(dst):
+        dst = os.path.join(folder, f"{base} ({n}).wav")
+        n += 1
+    shutil.copyfile(src, dst)
+    return {"path": dst}
+
+
 # ── Cut via XML (rebuild the sequence instead of editing it N times) ──
 
 class XmlCutRequest(BaseModel):
@@ -754,15 +884,27 @@ def _run_transcribe_worker(audio_path, model, language, start_from, song_mode=Fa
         # Ensure file is accessible (macOS TCC may block ~/Documents etc.)
         audio_path = ensure_accessible(audio_path)
 
-        # Song mode: isolate vocals with Demucs first, then transcribe the
-        # clean vocal track. This is the industry-standard approach for music
-        # lyrics transcription (used by WhisperX and similar tools).
+        # Song mode: isolate the vocals first, then transcribe the clean vocal
+        # track (the approach WhisperX and similar tools use for lyrics).
+        # Mel-Band RoFormer on the GPU when its model is already downloaded
+        # (the Separate button fetches it), else Demucs.
         if song_mode:
             transcribe_progress.update({
                 "progress": 0.02, "stage": "isolating_vocals",
-                "detail": "Isolating vocals from music (Demucs, ~30-90s)...",
+                "detail": "Isolating vocals from music…",
             })
-            vocals_path = _separate_vocals(audio_path)
+            vocals_path = None
+            if stem_separator.is_downloaded():
+                def _song_report(p, detail):
+                    transcribe_progress.update({"progress": round(0.02 + 0.26 * p, 3),
+                                                "stage": "isolating_vocals", "detail": detail})
+                try:
+                    vocals_path = _separate_cached(audio_path, 0.0, 0.0, _song_report,
+                                                   lambda: transcribe_progress.get("cancel", False))[0]
+                except Exception as e:
+                    print(f"[song mode] RoFormer failed ({e}); trying Demucs")
+            if not vocals_path:
+                vocals_path = _separate_vocals(audio_path)
             if vocals_path:
                 audio_path = vocals_path
                 transcribe_progress.update({

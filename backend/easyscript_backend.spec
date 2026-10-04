@@ -242,6 +242,9 @@ a = Analysis(
         ("xml_cut.py", "."),
         ("speakers.py", "."),
         ("voices.py", "."),
+        ("separator.py", "."),
+        ("roformer.py", "."),
+        ("roformer_mlx.py", "."),
     ],
     hiddenimports=[
         # uvicorn internals
@@ -292,6 +295,12 @@ a = Analysis(
         "opentelemetry.context.contextvars_context",
         "speakers",
         "voices",
+        # Voice / music separation (Mel-Band RoFormer); onnx for the one-time
+        # DirectML export of its core on Windows
+        "separator",
+        "roformer",
+        "roformer_mlx",
+        "onnx",
         "lightning_fabric",
         "pytorch_lightning",
         "speechbrain",

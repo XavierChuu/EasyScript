@@ -138,6 +138,9 @@ button { font: inherit; color: inherit; }
 .btn-grid-3 { grid-template-columns: 1fr 1fr 1fr; }
 .btn-grid .btn { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding: 0 6px; }
 
+/* Voice / music separation (Source card) */
+.stem-box, .stem-bar { display: flex; flex-direction: column; gap: 6px; }
+
 .icon-btn {
   width: 24px; height: 24px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;

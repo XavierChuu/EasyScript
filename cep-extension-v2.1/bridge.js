@@ -84,11 +84,34 @@
     getSelectedClip: function (mode, track) {
       return esJson("esGetSelectedClip('" + q(mode) + "','" + q(String(track)) + "')");
     },
+    // Import a stem and lay it at startTicks on the first audio track that is
+    // empty for its whole length; adds a stereo track at the bottom when every
+    // track is busy there. Resolves {track, startTicks, name, addedTrack}.
+    placeStem: function (path, startTicks, durationTicks) {
+      var j = q(JSON.stringify({ path: path, startTicks: String(startTicks), durationTicks: String(durationTicks) }));
+      function place() {
+        return es("esPlaceStem('" + j + "')").then(function (res) {
+          try { return JSON.parse(res); }
+          catch (e) { throw new Error("Bad response from Premiere: " + String(res).slice(0, 200)); }
+        });
+      }
+      return place().then(function (r) {
+        if (r.ok) { r.addedTrack = false; return r; }
+        if (!r.needTrack) throw new Error(r.error || "Import failed");
+        return esJson("esAddAudioTrack()").then(function () { return delay(150); }).then(place).then(function (r2) {
+          if (!r2.ok) throw new Error(r2.needTrack ? "Could not add a free audio track." : (r2.error || "Import failed"));
+          r2.addedTrack = true;
+          return r2;
+        });
+      });
+    },
     seqMethods: function () { return es("esListSeqMethods()"); },
     dumpLabelAPI: function () { return es("esDumpLabelAPI()"); }, // TEMP v2.1
-    renderRange: function (mode, start, end) {
+    // quality "hq" = 48 kHz stereo (stem separation, material that goes back
+    // on the timeline); default 16 kHz mono (analysis).
+    renderRange: function (mode, start, end, quality) {
       var ext = cs ? cs.getSystemPath(SystemPath.EXTENSION) : "";
-      var preset = ext + "/presets/WAV_Mono_16bit_16kHz.epr";
+      var preset = ext + "/presets/" + (quality === "hq" ? "WAV_Stereo_16bit_48kHz.epr" : "WAV_Mono_16bit_16kHz.epr");
       return esJson("esRenderRange('" + q(preset) + "','" + q(mode) + "'," + (Number(start) || 0) + "," + (Number(end) || 0) + ")");
     },
     // Razor and remove in TWO separate evalScript calls so the DOM refreshes

@@ -1,8 +1,9 @@
-# EasyScript — Premiere Pro panel: silence cut, transcription, translation, beat markers
+# EasyScript — Premiere Pro panel: silence cut, transcription, translation, beat markers, voice / music separation
 
 ## Architecture
 - **cep-extension-v2.1/** — the Premiere panel (CEP). `index.html/js`, `styles.css`,
-  `waveform.js` (canvas waveform), `beats.js` (beat markers), `bridge.js`
+  `waveform.js` (canvas waveform), `beats.js` (beat markers), `separate.js`
+  (voice / music stems), `bridge.js`
   (promise wrapper over `evalScript`), `host.jsx` (ExtendScript — ES3: no
   let/const/arrows; JSON is polyfilled).
 - **backend/** — Python FastAPI server on `localhost:9876`, bundled with
@@ -55,6 +56,23 @@
   (`~/.easyscript/voices.json`) matched by cosine ≥ 0.5.
 - Tag speaker "New sequence" = `/xml/cut` with `splits_ticks` + `labels`
   (+ `only_media` so music / B-roll aren't split).
+- Separation: Mel-Band RoFormer "Kim vocal" (`KimberleyJSN/melbandroformer`, MIT,
+  913 MB, downloaded on first use to `~/.easyscript/models/separation`).
+  `roformer.py` = torch model (bit-exact vs. the reference code; STFT / masks
+  always on the CPU), `roformer_mlx.py` = its transformer core in MLX fp16.
+  Devices (`separator.detect_device`): MLX Metal → CUDA → DirectML (one-time
+  ONNX export of the core) → MPS → CPU. Vocals are predicted; music = source −
+  vocals at the source rate, written as float WAV so the stems sum exactly.
+  Stems are cached per source range in `~/.easyscript/stems` (7 days); song
+  mode reuses them when the model is present (else Demucs).
+- Stems input is full quality: the clip's source media range, or a 48 kHz
+  stereo render (`presets/WAV_Stereo_16bit_48kHz.epr`) — never the 16 kHz
+  analysis file. Import copies the stem to `<export dir>/EasyScript Stems` and
+  `esPlaceStem` lays it at the loaded range's start ticks on the first unlocked
+  audio track free for its whole length; when none is, `esAddAudioTrack` (QE)
+  appends a stereo track in a separate evalScript call, then it retries.
+- GPU first for every heavy task; CPU only as a fallback or where measured
+  faster (NLLB: CTranslate2 int8 on the CPU beats transformers on MPS 2x).
 
 ## Frame math
 - Always use the sequence's ticks-per-frame (`seq.timebase`; 254016000000

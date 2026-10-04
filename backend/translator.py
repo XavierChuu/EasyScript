@@ -185,6 +185,16 @@ class OllamaTranslator:
 
 # ── Hy-MT2 Local Provider ──
 
+def _torch_gpu_device():
+    """cuda → mps (Apple Silicon) → cpu, for the transformers-based translators."""
+    import torch
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 class HyMT2Translator:
     """Offline translation using Tencent Hy-MT2 (tencent/Hy-MT2-1.8B or 7B)."""
 
@@ -215,8 +225,9 @@ class HyMT2Translator:
 
         # The bundle sets OMP_NUM_THREADS=1; CPU generation is far slower that way.
         __import__("torch").set_num_threads(max(1, min(8, os.cpu_count() or 4)))
-        self._device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
-        dtype = __import__("torch").float16 if self._device == "cuda" else __import__("torch").float32
+        # GPU first: Metal runs the 1.8B model ~2x faster than the CPU (M5, fp16).
+        self._device = _torch_gpu_device()
+        dtype = __import__("torch").float16 if self._device != "cpu" else __import__("torch").float32
 
         self._tokenizer = AutoTokenizer.from_pretrained(
             self.model_id,
@@ -418,8 +429,8 @@ class NLLBTranslator:
         from transformers import AutoModelForSeq2SeqLM
         # The bundle sets OMP_NUM_THREADS=1; generation is ~6x slower that way.
         torch.set_num_threads(max(1, min(8, os.cpu_count() or 4)))
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.float16 if self._device == "cuda" else torch.float32
+        self._device = _torch_gpu_device()
+        dtype = torch.float16 if self._device != "cpu" else torch.float32
         self._model = AutoModelForSeq2SeqLM.from_pretrained(snapshot, dtype=dtype).to(self._device)
         self._model.eval()
 

@@ -58,6 +58,22 @@
         </label>
       </div>
       <button class="btn btn-primary btn-block" id="loadAudioBtn">Load audio from timeline</button>
+      <!-- Voice / music separation (separate.js) -->
+      <div class="stem-box hidden" id="stemBox">
+        <button class="btn btn-block" id="separateBtn" title="Split the loaded audio into voice and music with a local AI model (Mel-Band RoFormer). First use downloads the model once (~870 MB).">Separate voice / music…</button>
+        <div class="btn-grid hidden" id="stemChoice">
+          <button class="btn" id="stemVoiceBtn" title="Remove the music, keep the voice — for transcription">Voice only</button>
+          <button class="btn" id="stemMusicBtn" title="Remove the voice, keep the music — for beat markers">Music only</button>
+        </div>
+        <div class="stem-bar hidden" id="stemBar">
+          <div class="segmented" id="stemSwitch" title="Which audio the waveform, playback, transcription and beats use">
+            <label><input type="radio" name="stemView" value="original" checked /><span>Original</span></label>
+            <label><input type="radio" name="stemView" value="vocals" /><span>Voice</span></label>
+            <label><input type="radio" name="stemView" value="music" /><span>Music</span></label>
+          </div>
+          <button class="btn btn-block" id="stemImportBtn" disabled>Import to timeline</button>
+        </div>
+      </div>
       <div class="status-line hidden" id="clipInfo"></div>
       <div class="meta-line hidden" id="audioInfo"></div>
     </section>
@@ -565,6 +581,7 @@
   <script src="bridge.js"></script>
   <script src="waveform.js"></script>
   <script src="beats.js"></script>
+  <script src="separate.js"></script>
   <script src="index.js"></script>
 </body>
 </html>
