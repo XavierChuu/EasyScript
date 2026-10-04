@@ -164,12 +164,15 @@ class BandSplit(nn.Module):
     def __init__(self, dim, dim_inputs):
         super().__init__()
         self.dim_inputs = dim_inputs
+        self.bounds = [(sum(dim_inputs[:i]), sum(dim_inputs[:i + 1])) for i in range(len(dim_inputs))]
         self.to_features = nn.ModuleList([
             nn.Sequential(RMSNorm(dim_in), nn.Linear(dim_in, dim)) for dim_in in dim_inputs])
 
     def forward(self, x):
-        x = x.split(self.dim_inputs, dim=-1)
-        return torch.stack([f(part) for part, f in zip(x, self.to_features)], dim=-2)
+        # Slices, not x.split(): the ONNX Split's 60-entry size tensor is rejected by
+        # ONNX Runtime 1.23 ("Cannot parse data from external tensors"), which sent
+        # DirectML separation back to the CPU. Same views, same result.
+        return torch.stack([f(x[..., a:b]) for (a, b), f in zip(self.bounds, self.to_features)], dim=-2)
 
 
 def _mlp(dim_in, dim_out, dim_hidden=None, depth=1, activation=nn.Tanh):

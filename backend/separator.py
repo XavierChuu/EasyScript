@@ -140,7 +140,11 @@ def _onnx_core(model, progress=None):
     """ONNX export of model.core (cached next to the checkpoint)."""
     import torch
 
-    path = os.path.join(MODEL_DIR, "core.onnx")
+    # v2: band split exported as Slices (2.3.0's core.onnx fails to load in ORT 1.23).
+    stale = os.path.join(MODEL_DIR, "core.onnx")
+    if os.path.isfile(stale):
+        os.remove(stale)
+    path = os.path.join(MODEL_DIR, "core-v2.onnx")
     if os.path.isfile(path):
         return path
     if progress:
@@ -253,6 +257,9 @@ class Separator:
         import torch
         from roformer import MelBandRoformer
 
+        # The bundle sets OMP_NUM_THREADS=1; the STFT / masks (every device but CUDA)
+        # and the torch CPU fallback are several times slower single-threaded.
+        torch.set_num_threads(max(1, min(8, os.cpu_count() or 4)))
         device = device or detect_device()
         state = torch.load(model_path(), map_location="cpu", weights_only=True)
         model = MelBandRoformer(**CONFIG).eval()
