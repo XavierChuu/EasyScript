@@ -1,6 +1,6 @@
 # EasyScript
 
-**Premiere Pro panel for silence cutting, transcription, translation and beat markers**, backed by a local Python server (Whisper, pyannote, numpy beat tracker). Everything runs on your machine — macOS (Apple Silicon / Metal) and Windows (NVIDIA CUDA or CPU).
+**Premiere Pro panel for silence cutting, transcription, translation, voice / music separation and beat markers**, backed by a local Python server (Whisper, pyannote, Mel-Band RoFormer, numpy beat tracker). Everything runs on your machine, GPU first — macOS (Apple Silicon / Metal) and Windows (NVIDIA CUDA, DirectML on any GPU, or CPU).
 
 ---
 
@@ -14,17 +14,22 @@
 
 ### Transcript
 - **Whisper transcription** — mlx-whisper on Apple Silicon, faster-whisper on CUDA/CPU; Turbo by default (Vietnamese long-form benchmark: same accuracy as Large V3 at ~3× the speed), word-level timestamps, optional vocabulary (names / terms) to bias recognition
-- **Music / Song mode** — Demucs vocal isolation + tunable vocal sensitivity, phrase gap and decode quality
+- **Music / Song mode** — vocal isolation (Mel-Band RoFormer when its model is present, else Demucs) + tunable vocal sensitivity, phrase gap and decode quality
 - **Speaker diarization** — pyannote community-1, bundled, no HuggingFace token; every word is attributed to its speaker and lines are split where the speaker really changes
 - **Voice library** — rename a speaker once and they are recognised by voice in later videos; move a line to another speaker or merge two speakers from the speaker tag
 - **Translation** — local (NLLB / Ollama) or Claude API, multiple target languages side by side
 - **Search & replace**, display modes (sentence / word / punctuation / max words per line)
 - **Captions** — export SRT (original or after cuts) and create a Premiere captions track
 
+### Voice / music separation
+- **Separate voice / music** — Mel-Band RoFormer (Kim vocal model, MIT) on a full-quality copy of the loaded range: **Voice only** for transcription, **Music only** for beats; switch Original / Voice / Music instantly
+- Runs on Metal (MLX) on Apple Silicon, CUDA or DirectML on Windows; the two stems add back up to the source exactly
+- **Import to timeline** at the original timecode on the first audio track that is free for the whole range — never overwriting audio; a new track is added when every track is busy there
+
 ### Beats
 - Beat / downbeat detection with auto or fixed BPM, tempo range and tightness
 - Marker spacing from 1/4 beat up to 4 bars, with meter, downbeat offset and half/double tempo — reviewed on the waveform before applying
-- Markers placed on the **selected clip** or on the **sequence timeline**; clear them again in one click
+- Markers placed on the **sequence timeline** or on the **clip selected in the timeline** (else the clip of the loaded audio, e.g. an imported stem); clear them again in one click
 
 ### Waveform
 - Canvas renderer with multi-resolution peaks — smooth zoom from a full 3-hour overview down to individual samples
@@ -34,9 +39,13 @@
 
 ## Install
 
-1. Install the panel: double-click `EasyScript-Premiere.zxp` with a ZXP installer (e.g. ZXPInstaller / Anastasiy's Extension Manager).
-2. Copy the backend into `~/.easyscript/backend` (the release bundle's installer does this). The panel starts it automatically.
-3. Open Premiere Pro → **Window → Extensions → EasyScript**.
+**Option 1 — installer:** run `install-mac.command` (macOS) or `install-win.bat` (Windows) from the release folder; it installs the panel and the backend.
+
+**Option 2 — manual:**
+1. Install `EasyScript-Premiere.zxp` (one file for macOS and Windows) with a ZXP installer (ZXP Installer by aescripts / Anastasiy's Extension Manager).
+2. Copy the *contents* of the release's `backend/` folder to `~/.easyscript/backend` (macOS) or `%USERPROFILE%\.easyscript\backend` (Windows) — the prebuilt backend needs no build. On macOS then run `xattr -dr com.apple.quarantine ~/.easyscript/backend`.
+
+Then open Premiere Pro → **Window → Extensions → EasyScript**; the panel starts the backend automatically. Full guide: `release-template/guide.html` (VI) / `guide-en.html` (EN).
 
 Requirements: Premiere Pro 22+ (CEP 9+), macOS 13+ or Windows 10+, 8 GB RAM (16 GB for large models). FFmpeg is bundled.
 
@@ -50,6 +59,7 @@ EasyScript/
 │   ├── index.html / index.js / styles.css
 │   ├── waveform.js         # canvas waveform
 │   ├── beats.js            # beat-marker UI
+│   ├── separate.js         # voice / music separation UI
 │   ├── bridge.js           # promise wrapper over evalScript
 │   ├── host.jsx            # ExtendScript (ES3, JSON polyfilled)
 │   └── package_zxp.*       # sign → dist/EasyScript-Premiere.zxp
@@ -60,6 +70,7 @@ EasyScript/
 │   ├── waveform.py         # multi-resolution peaks
 │   ├── beat_tracker.py     # numpy beat tracker
 │   ├── xml_cut.py          # FCP7 XML sequence cutter
+│   ├── separator.py        # voice / music stems (roformer.py torch, roformer_mlx.py MLX core)
 │   ├── backend_main.py     # PyInstaller entry
 │   ├── easyscript_backend.spec
 │   └── tests/
@@ -118,4 +129,5 @@ MIT License
 - [mlx-whisper](https://github.com/ml-explore/mlx-examples) by Apple MLX team
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) by SYSTRAN
 - [pyannote-audio](https://github.com/pyannote/pyannote-audio) for speaker diarization; the bundled [speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) pipeline is by pyannoteAI, licensed [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
+- [Mel-Band RoFormer](https://arxiv.org/abs/2310.01809) (ByteDance) for voice / music separation; vocal model weights by [Kimberley Jensen](https://huggingface.co/KimberleyJSN/melbandroformer) (MIT), model code adapted from [lucidrains/BS-RoFormer](https://github.com/lucidrains/BS-RoFormer) (MIT)
 - [FastAPI](https://fastapi.tiangolo.com/) for the backend framework

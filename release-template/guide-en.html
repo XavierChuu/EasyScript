@@ -27,69 +27,79 @@
 <body>
 
 <h1>EasyScript for Premiere Pro</h1>
-<p class="sub">Silence cut · transcription · speaker labeling · subtitles · translation · beat markers — directly on your timeline. <b>Installation &amp; User Guide — version 2.2</b></p>
+<p class="sub">Silence cut · transcription · speaker labeling · subtitles · translation · voice / music separation · beat markers — directly on your timeline. <b>Installation &amp; User Guide — version 2.3</b></p>
 
 <h2>1. Requirements</h2>
 <ul>
-  <li><b>Adobe Premiere Pro 2022 or later</b> (macOS or Windows 10/11).</li>
-  <li>About <b>8&nbsp;GB</b> free: backend ~3&nbsp;GB, Turbo transcription model ~1.6&nbsp;GB (downloaded on first use), NLLB translation model ~3&nbsp;GB (only if used).</li>
-  <li>Fastest on Apple Silicon Macs or Windows PCs with an NVIDIA GPU. Computers without a GPU work too (slower).</li>
-  <li>Internet is needed the first time to download models. After that everything runs <b>offline on your computer</b>.</li>
+  <li><b>Adobe Premiere Pro 2022 or later</b> (macOS 13+ or Windows 10/11).</li>
+  <li>About <b>9&nbsp;GB</b> free: backend ~3&nbsp;GB; models downloaded the first time each feature is used: Turbo transcription ~1.6&nbsp;GB, voice / music separation ~0.9&nbsp;GB, NLLB translation ~3&nbsp;GB.</li>
+  <li>EasyScript <b>runs on the GPU first</b>: Apple Silicon Macs (Metal) are fastest; on Windows an NVIDIA GPU speeds up transcription and any GPU (DirectML) speeds up speakers and separation. Computers without a GPU work too, just slower.</li>
+  <li>Internet is needed the first time each feature is used, to download its model. After that everything runs <b>offline on your computer</b>.</li>
 </ul>
 
 <h2>2. Installation</h2>
-<p>The folder you received contains <code>EasyScript-Premiere.zxp</code>, a <code>backend/</code> folder, the installers and this guide.</p>
+<p>The install folder contains the panel <code>EasyScript-Premiere.zxp</code> (the same file for Mac and Windows), a <code>backend/</code> folder, the automatic installers and this guide. <b>Quit Premiere completely</b> before installing.</p>
 
-<h3>macOS</h3>
+<h3>Option 1 — Automatic install (recommended)</h3>
+<p><b>macOS:</b> right-click <code>install-mac.command</code> → <b>Open</b> → <b>Open</b> (macOS asks the first time). The script installs the panel and the backend.</p>
+<p><b>Windows:</b> double-click <code>install-win.bat</code> (if blocked: right-click → <b>Run as administrator</b>).</p>
+
+<h3>Option 2 — Manual install with the ZXP file</h3>
 <ol>
-  <li><b>Quit Premiere completely</b> (Cmd&nbsp;+&nbsp;Q).</li>
-  <li>Right-click <code>install-mac.command</code> → <b>Open</b> → <b>Open</b> (macOS asks the first time).</li>
-  <li>The script enables extensions and installs the panel and backend. Then reopen Premiere.</li>
+  <li><b>Install the panel:</b> open <code>EasyScript-Premiere.zxp</code> with a ZXP installer such as <b>ZXP Installer</b> (aescripts) or <b>Anastasiy’s Extension Manager</b> (both free, for Mac and Windows): drag the .zxp onto the installer window.</li>
+  <li><b>Copy the backend:</b> copy <b>everything inside</b> the <code>backend/</code> folder to the path below (create the folders if needed). Nothing to build or install — the backend is ready to run.
+    <table>
+      <tr><th>System</th><th>Path</th><th>Afterwards this file must exist</th></tr>
+      <tr><td>macOS</td><td><code>~/.easyscript/backend</code></td><td><code>~/.easyscript/backend/EasyScript-backend</code></td></tr>
+      <tr><td>Windows</td><td><code>%USERPROFILE%\.easyscript\backend</code></td><td><code>…\.easyscript\backend\EasyScript-backend.exe</code></td></tr>
+    </table>
+    The <code>.easyscript</code> folder is hidden: on a Mac press <b>Cmd&nbsp;+&nbsp;Shift&nbsp;+&nbsp;G</b> in Finder and type <code>~/.easyscript</code>; on Windows type <code>%USERPROFILE%\.easyscript</code> in File Explorer’s address bar.
+  </li>
+  <li><b>macOS only:</b> open <b>Terminal</b> and run this so macOS lets the backend start (required for downloaded / unzipped files):<br>
+    <code>xattr -dr com.apple.quarantine ~/.easyscript/backend</code></li>
 </ol>
+<div class="box warn">Copy the <b>contents</b> of <code>backend/</code>, not the folder into itself (wrong: <code>.easyscript/backend/backend/…</code>). When updating, delete the old backend folder first, then copy the new one.</div>
 
-<h3>Windows</h3>
-<ol>
-  <li><b>Quit Premiere.</b></li>
-  <li>Double-click <code>install-win.bat</code> (if blocked: right-click → <b>Run as administrator</b>).</li>
-  <li>When it finishes, reopen Premiere.</li>
-</ol>
-
-<div class="box">Open the panel: <b>Window → Extensions → EasyScript</b>. The panel <b>starts the backend automatically</b> (top corner shows <span class="pill">Connecting</span> → <span class="pill">Connected</span>). The first transcription / translation downloads its model (needs internet, takes a few minutes).</div>
+<div class="box">Open the panel: <b>Window → Extensions → EasyScript</b>. The panel <b>starts the backend automatically</b> (the badge shows <span class="pill">Connecting</span> → <span class="pill">Connected</span>). The first use of each feature downloads its model (needs internet, takes a few minutes).</div>
 
 <h2>3. Workflow</h2>
-<p>The panel has 3 tabs: <b>Cut</b> (silences), <b>Transcript</b> (transcription, speakers, subtitles, translation) and <b>Beats</b> (music beat markers).</p>
+<p>The top of the panel holds the audio source and the waveform; below are 3 tabs: <b>Cut</b> (silences), <b>Transcript</b> (transcription, speakers, subtitles, translation) and <b>Beats</b> (beat markers).</p>
 <table>
-  <tr><th>Step</th><th>Action</th></tr>
-  <tr><td><span class="step">1</span> Source</td><td>Select a <b>clip</b> on the timeline (or set <b>In/Out</b>, or use the entire timeline) and click <b>Load audio</b>. Scroll to zoom the waveform, drag to pan, click to move the playhead.</td></tr>
-  <tr><td><span class="step">2</span> Detect silence</td><td><b>Cut</b> tab: find silences, tune padding / dB threshold / minimum length and preview them on the waveform.</td></tr>
-  <tr><td><span class="step">3</span> Cut</td><td><b>Apply cut</b> edits the timeline directly. <b>Cut to new sequence</b> builds a new, already-cut sequence in one step (recommended for long videos; the original stays untouched).</td></tr>
-  <tr><td><span class="step">4</span> Transcribe</td><td><b>Transcript</b> tab: pick the <b>Model</b> (default <b>Turbo</b> — accurate and fast) and <b>Language</b>. <b>Vocabulary</b>: type names, brands or terms so they are recognised correctly.</td></tr>
-  <tr><td><span class="step">5</span> Speakers</td><td>Identify who is speaking — <b>no account or token needed</b>. Lines where two people talk are split at the right word. Click a speaker tag to <b>rename</b>, <b>move the line to another speaker</b> or create a new one; giving two speakers the same name merges them.</td></tr>
-  <tr><td><span class="step">6</span> Voices</td><td>When you rename a speaker (e.g. "Speaker A" → "Lan") their voice is saved; in later videos that person is <b>recognised automatically</b> (✓ next to the name). Manage saved voices in Settings.</td></tr>
-  <tr><td><span class="step">7</span> Tag speaker</td><td>Cuts clips where the speaker changes and names / colours each clip per speaker. <b>New sequence — exact</b>: builds a new sequence, frame-exact, music / B-roll untouched. <b>In place</b>: edits the open sequence.</td></tr>
-  <tr><td><span class="step">8</span> Subtitles</td><td><b>Make subtitle</b> creates captions on the timeline (original + translations). <b>Export SRT</b> saves a file. Line breaks follow the Segments "Display mode", timed by word.</td></tr>
-  <tr><td><span class="step">9</span> Translate</td><td>Segments → <b>Translation</b> tab: add target languages and click Translate. Choose the translator in Settings (NLLB-200 offline, Ollama, Hy-MT2 or Claude API).</td></tr>
-  <tr><td><span class="step">10</span> Beats</td><td><b>Beats</b> tab: detect the beat, choose marker spacing (1/4 beat → 4 bars), preview on the waveform, then add markers to the clip or the timeline.</td></tr>
+  <tr><th>Step</th><th>What to do</th></tr>
+  <tr><td><span class="step">1</span> Source</td><td>Select a <b>clip</b> on the timeline (or set <b>In/Out</b> points, or use the whole sequence) and click <b>Load audio</b>. The waveform appears; scroll to zoom, drag to pan, click to move the playhead.</td></tr>
+  <tr><td><span class="step">2</span> Separate voice / music <span class="pill">NEW</span></td><td>Click <b>Separate voice / music…</b> → <b>Voice only</b> (music removed — for transcription) or <b>Music only</b> (voice removed — for beats). The separated audio replaces the original in the waveform, playback, transcription and Beats; <b>Original | Voice | Music</b> switches instantly. The first run downloads a ~870&nbsp;MB model.</td></tr>
+  <tr><td><span class="step">3</span> Put it on the timeline <span class="pill">NEW</span></td><td><b>Import voice / music to timeline</b> places the separated audio <b>at its original timecode</b> on the first audio track that is empty for that whole range (it never overwrites existing audio and skips locked tracks). If every track has audio there, the panel adds a new track. The file is saved in <code>EasyScript Stems</code> inside the Export folder and in the project bin <b>EasyScript Stems</b>.</td></tr>
+  <tr><td><span class="step">4</span> Detect silence</td><td><b>Cut</b> tab: find silences, adjust padding / dB threshold / minimum length and preview them on the waveform.</td></tr>
+  <tr><td><span class="step">5</span> Cut</td><td><b>Apply cut</b> edits the timeline directly. <b>Cut to new sequence</b> builds a new, cut sequence in one step (recommended for long videos; the original stays untouched).</td></tr>
+  <tr><td><span class="step">6</span> Transcribe</td><td><b>Transcript</b> tab: choose the <b>Model</b> (default <b>Turbo</b> — accurate and fast) and <b>Language</b>. <b>Vocabulary</b>: enter names, brands and terms to recognise them better. For songs / videos with background music, separate <b>Voice only</b> first (or turn on <b>Song mode</b>) for cleaner text.</td></tr>
+  <tr><td><span class="step">7</span> Speakers</td><td>Speaker labeling — <b>no account or token needed</b>. A line spoken by two people is split exactly where the speaker changes. Click a speaker tag to <b>rename</b>, <b>move the line to another speaker</b> or create a new one; giving two speakers the same name merges them.</td></tr>
+  <tr><td><span class="step">8</span> Voice memory</td><td>When you rename a speaker (e.g. "Speaker A" → "Anna"), that voice is saved. In later videos the person is <b>recognised automatically</b> (✓ next to the name). Manage saved voices in Settings.</td></tr>
+  <tr><td><span class="step">9</span> Tag speaker</td><td>Cuts clips where the speaker changes, names and colours them per speaker. <b>New sequence — exact</b>: builds a new sequence, frame-exact, music / B-roll untouched. <b>In place</b>: edits the open sequence.</td></tr>
+  <tr><td><span class="step">10</span> Subtitles</td><td><b>Make subtitle</b> creates captions on the timeline (original + any translations). <b>Export SRT</b> saves a file. Line breaks follow the Segments "Display mode"; timing comes from word timestamps.</td></tr>
+  <tr><td><span class="step">11</span> Translate</td><td>Segments → <b>Translation</b> tab: add target languages and click Translate. Choose the engine in Settings (NLLB-200 offline, Ollama, Hy-MT2 or Claude API).</td></tr>
+  <tr><td><span class="step">12</span> Beats</td><td><b>Beats</b> tab: detect the beat (best on <b>Music only</b>), choose the marker spacing (1/4 beat → 4 bars), review on the waveform, then add markers. <b>Add to → Timeline</b>: sequence markers. <b>Add to → Selected clip</b>: markers on the <b>clip selected in the timeline</b> (e.g. the music you just imported), moving with it; with nothing selected, on the clip of the audio loaded in the panel.</td></tr>
 </table>
 
 <h2>4. Settings (⚙ button)</h2>
 <ul>
-  <li><b>Export folder</b>: where SRT / XML files are saved.</li>
+  <li><b>Export folder</b>: where SRT / XML files and imported voice / music files (subfolder <code>EasyScript Stems</code>) are saved. Keep those files while a project uses them.</li>
   <li><b>Speakers</b>: saved voices (delete any of them). "Speaker options" in the Transcript tab: known number of speakers, sensitivity, speed, recognise saved voices.</li>
-  <li><b>Translation</b>: choose the translator. <b>NLLB-200</b> runs offline: click <b>Download</b> once (~2.4&nbsp;GB, then it optimises itself for your computer); Ollama / Hy-MT2 run locally; Claude API needs an API key.</li>
+  <li><b>Translation</b>: choose the engine. <b>NLLB-200</b> runs offline: click <b>Download</b> once (~2.4&nbsp;GB, then optimised for your computer); Ollama / Hy-MT2 run locally; Claude API needs an API key.</li>
 </ul>
 
 <h2>5. Troubleshooting</h2>
 <table>
-  <tr><th>Symptom</th><th>Fix</th></tr>
-  <tr><td>"EasyScript" missing from Extensions</td><td>Run the installer again, then <b>quit &amp; reopen Premiere</b>.</td></tr>
-  <tr><td>Panel stays <b>Offline</b></td><td>The backend isn't running. Close and reopen the panel (it starts the backend). The first start can take a few minutes.</td></tr>
-  <tr><td>First Speakers run is slow</td><td>Normal: the model loads the first time (~10–20 s). Later runs are fast.</td></tr>
-  <tr><td>First transcription / translation is slow</td><td>The model is downloading (needs internet). Only once.</td></tr>
-  <tr><td>Wrong number of speakers</td><td>Set <b>Known speakers</b> or change <b>Sensitivity</b> in "Speaker options"; fix lines by clicking the speaker tag.</td></tr>
+  <tr><th>Problem</th><th>Fix</th></tr>
+  <tr><td>"EasyScript" is missing from Extensions</td><td>Option 1: run the installer again. Option 2: reinstall the .zxp with the ZXP installer. Then <b>quit &amp; reopen Premiere</b>.</td></tr>
+  <tr><td>The badge stays <b>Offline</b></td><td>The backend isn't running. Check the backend file is at the path in section 2 (Option 2). On a Mac, run the <code>xattr</code> command above again. Then close and reopen the panel. The first start can take a few minutes.</td></tr>
+  <tr><td>First Speakers / Separate run is slow</td><td>Normal: the model is downloaded and loaded the first time. Later runs are fast.</td></tr>
+  <tr><td>Separation is slow</td><td>Without a GPU it runs on the CPU (a few times the audio length). The progress line shows the device (e.g. <b>GPU · Metal</b>, <b>GPU · DirectML</b>, <b>CPU</b>).</td></tr>
+  <tr><td>Import to timeline added a new track</td><td>By design: every audio track already had audio in that range (or was locked), so a track was added instead of overwriting.</td></tr>
+  <tr><td>"Selected clip" markers landed on the wrong clip</td><td>Select the clip to mark in the timeline before clicking <b>Add markers</b>. The status line names the clip that was marked.</td></tr>
+  <tr><td>Wrong number of speakers</td><td>Set <b>Known speakers</b> or change <b>Sensitivity</b> in "Speaker options"; fix lines by hand by clicking the speaker tag.</td></tr>
 </table>
 
-<div class="box warn"><b>Note:</b> EasyScript never modifies your source files. All cuts/renames apply to clips on the timeline — you can Undo (Cmd/Ctrl&nbsp;+&nbsp;Z) at any time.</div>
+<div class="box warn"><b>Note:</b> EasyScript never modifies your source files. Cuts and renames apply to timeline clips; separated voice / music are new files. You can Undo (Cmd/Ctrl&nbsp;+&nbsp;Z) at any time.</div>
 
 <p class="foot">EasyScript for Premiere Pro — User Guide. © EasyScript. All rights reserved.</p>
 

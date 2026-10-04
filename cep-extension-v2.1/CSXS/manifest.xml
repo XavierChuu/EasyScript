@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ExtensionManifest Version="12.0"
   ExtensionBundleId="com.easyscript.premiere"
-  ExtensionBundleVersion="2.2.0"
+  ExtensionBundleVersion="2.3.0"
   ExtensionBundleName="EasyScript">
 
   <ExtensionList>
-    <Extension Id="com.easyscript.premiere.panel" Version="2.2.0"/>
+    <Extension Id="com.easyscript.premiere.panel" Version="2.3.0"/>
   </ExtensionList>
 
   <ExecutionEnvironment>

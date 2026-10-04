@@ -28,54 +28,62 @@
 <body>
 
 <h1>EasyScript cho Premiere Pro</h1>
-<p class="sub">Cắt khoảng lặng · phiên âm · phân biệt người nói · phụ đề · dịch · marker theo nhịp — trực tiếp trên timeline. <b>Hướng dẫn cài đặt &amp; sử dụng — bản 2.2</b></p>
+<p class="sub">Cắt khoảng lặng · phiên âm · phân biệt người nói · phụ đề · dịch · tách giọng / nhạc · marker theo nhịp — trực tiếp trên timeline. <b>Hướng dẫn cài đặt &amp; sử dụng — bản 2.3</b></p>
 
 <h2>1. Yêu cầu</h2>
 <ul>
-  <li><b>Adobe Premiere Pro 2022 trở lên</b> (macOS hoặc Windows 10/11).</li>
-  <li>Khoảng <b>8&nbsp;GB</b> trống: backend ~3&nbsp;GB, model phiên âm Turbo ~1,6&nbsp;GB (tải lần đầu), model dịch NLLB ~3&nbsp;GB (chỉ khi dùng).</li>
-  <li>Nhanh nhất: Mac Apple Silicon, hoặc Windows có GPU NVIDIA. Máy không có GPU vẫn dùng được (chậm hơn).</li>
-  <li>Cần Internet ở lần dùng đầu để tải model. Sau đó mọi thứ chạy <b>offline trên máy bạn</b>.</li>
+  <li><b>Adobe Premiere Pro 2022 trở lên</b> (macOS 13+ hoặc Windows 10/11).</li>
+  <li>Khoảng <b>9&nbsp;GB</b> trống: backend ~3&nbsp;GB; các model tải lần đầu khi dùng: phiên âm Turbo ~1,6&nbsp;GB, tách giọng / nhạc ~0,9&nbsp;GB, dịch NLLB ~3&nbsp;GB.</li>
+  <li>EasyScript <b>ưu tiên chạy trên GPU</b>: Mac chip M (Metal) nhanh nhất; Windows dùng GPU NVIDIA cho phiên âm và mọi GPU (DirectML) cho phân biệt người nói / tách giọng. Máy không có GPU vẫn dùng được, chỉ chậm hơn.</li>
+  <li>Cần Internet ở lần đầu dùng mỗi tính năng để tải model. Sau đó mọi thứ chạy <b>offline trên máy bạn</b>.</li>
 </ul>
 
 <h2>2. Cài đặt</h2>
-<p>Trong thư mục bạn nhận được có: <code>EasyScript-Premiere.zxp</code>, thư mục <code>backend/</code>, file cài, và hướng dẫn này.</p>
+<p>Thư mục cài đặt gồm: file panel <code>EasyScript-Premiere.zxp</code> (dùng chung cho Mac và Windows), thư mục <code>backend/</code>, file cài tự động và hướng dẫn này. <b>Thoát hẳn Premiere</b> trước khi cài.</p>
 
-<h3>macOS</h3>
+<h3>Cách 1 — Cài tự động (khuyên dùng)</h3>
+<p><b>macOS:</b> chuột phải vào <code>install-mac.command</code> → <b>Open</b> → <b>Open</b> (lần đầu macOS hỏi xác nhận). Script tự cài panel và backend.</p>
+<p><b>Windows:</b> bấm đúp <code>install-win.bat</code> (nếu bị chặn: chuột phải → <b>Run as administrator</b>).</p>
+
+<h3>Cách 2 — Cài thủ công bằng file ZXP</h3>
 <ol>
-  <li><b>Thoát hẳn Premiere</b> (Cmd&nbsp;+&nbsp;Q).</li>
-  <li>Chuột phải vào <code>install-mac.command</code> → <b>Open</b> → <b>Open</b> (lần đầu macOS hỏi xác nhận).</li>
-  <li>Script tự bật chế độ extension, cài panel và backend. Xong thì mở lại Premiere.</li>
+  <li><b>Cài panel:</b> mở <code>EasyScript-Premiere.zxp</code> bằng một trình cài ZXP, ví dụ <b>ZXP Installer</b> (aescripts) hoặc <b>Anastasiy’s Extension Manager</b> (cả hai miễn phí, có cho Mac và Windows): kéo file .zxp vào cửa sổ trình cài.</li>
+  <li><b>Chép backend:</b> chép <b>toàn bộ nội dung bên trong</b> thư mục <code>backend/</code> vào đúng đường dẫn dưới đây (tạo thư mục nếu chưa có). Không cần build hay cài thêm gì — backend đã đóng gói sẵn.
+    <table>
+      <tr><th>Hệ điều hành</th><th>Đường dẫn</th><th>Sau khi chép phải có file</th></tr>
+      <tr><td>macOS</td><td><code>~/.easyscript/backend</code></td><td><code>~/.easyscript/backend/EasyScript-backend</code></td></tr>
+      <tr><td>Windows</td><td><code>%USERPROFILE%\.easyscript\backend</code></td><td><code>…\.easyscript\backend\EasyScript-backend.exe</code></td></tr>
+    </table>
+    Thư mục <code>.easyscript</code> bị ẩn: trên Mac, trong Finder bấm <b>Cmd&nbsp;+&nbsp;Shift&nbsp;+&nbsp;G</b> rồi gõ <code>~/.easyscript</code>; trên Windows, gõ <code>%USERPROFILE%\.easyscript</code> vào thanh địa chỉ của File Explorer.
+  </li>
+  <li><b>Chỉ trên macOS:</b> mở <b>Terminal</b> và chạy lệnh sau để macOS cho phép backend chạy (bắt buộc với file tải về / giải nén):<br>
+    <code>xattr -dr com.apple.quarantine ~/.easyscript/backend</code></li>
 </ol>
+<div class="box warn">Chép <b>nội dung</b> của <code>backend/</code>, không chép cả thư mục lồng vào nhau (sai: <code>.easyscript/backend/backend/…</code>). Khi cập nhật bản mới, xóa thư mục backend cũ trước rồi chép lại.</div>
 
-<h3>Windows</h3>
-<ol>
-  <li><b>Thoát hẳn Premiere.</b></li>
-  <li>Bấm đúp <code>install-win.bat</code> (nếu bị chặn: chuột phải → <b>Run as administrator</b>).</li>
-  <li>Cài xong, mở lại Premiere.</li>
-</ol>
-
-<div class="box">Mở panel: <b>Window → Extensions → EasyScript</b>. Panel <b>tự khởi động backend</b> (góc trên hiện <span class="pill">Connecting</span> → <span class="pill">Connected</span>). Lần phiên âm / dịch đầu tiên sẽ tải model (cần mạng, chờ vài phút).</div>
+<div class="box">Mở panel: <b>Window → Extensions → EasyScript</b>. Panel <b>tự khởi động backend</b> (góc trên hiện <span class="pill">Connecting</span> → <span class="pill">Connected</span>). Lần đầu dùng mỗi tính năng sẽ tải model (cần mạng, chờ vài phút).</div>
 
 <h2>3. Quy trình sử dụng</h2>
-<p>Panel có 3 tab: <b>Cut</b> (khoảng lặng), <b>Transcript</b> (phiên âm, người nói, phụ đề, dịch) và <b>Beats</b> (marker theo nhịp nhạc).</p>
+<p>Phần trên của panel là nguồn audio và sóng âm; bên dưới có 3 tab: <b>Cut</b> (khoảng lặng), <b>Transcript</b> (phiên âm, người nói, phụ đề, dịch) và <b>Beats</b> (marker theo nhịp nhạc).</p>
 <table>
   <tr><th>Bước</th><th>Thao tác</th></tr>
   <tr><td><span class="step">1</span> Chọn nguồn</td><td>Chọn <b>clip</b> trên timeline (hoặc đặt vạch <b>In/Out</b>, hoặc cả timeline) rồi bấm <b>Load audio</b>. Sóng âm hiện ra; cuộn chuột để zoom, kéo để di chuyển, bấm để đưa playhead tới đó.</td></tr>
-  <tr><td><span class="step">2</span> Detect silence</td><td>Tab <b>Cut</b>: phát hiện khoảng lặng, chỉnh padding / ngưỡng dB / độ dài tối thiểu và xem trước trên sóng âm.</td></tr>
-  <tr><td><span class="step">3</span> Cắt</td><td><b>Apply cut</b>: cắt trực tiếp trên timeline. <b>Cut to new sequence</b>: dựng một sequence mới đã cắt trong một bước (khuyên dùng cho video dài, sequence gốc giữ nguyên).</td></tr>
-  <tr><td><span class="step">4</span> Transcribe</td><td>Tab <b>Transcript</b>: chọn <b>Model</b> (mặc định <b>Turbo</b> — chính xác và nhanh) và <b>Language</b>. Ô <b>Vocabulary</b>: nhập tên riêng, thương hiệu, thuật ngữ để nhận dạng đúng hơn.</td></tr>
-  <tr><td><span class="step">5</span> Speakers</td><td>Phân biệt người nói — <b>không cần tài khoản hay token</b>. Câu có 2 người nói sẽ được tách đúng chỗ. Bấm vào tag người nói để <b>đổi tên</b>, <b>chuyển câu sang người khác</b> hoặc tạo người mới; đặt trùng tên sẽ gộp hai người.</td></tr>
-  <tr><td><span class="step">6</span> Nhớ giọng</td><td>Khi bạn đổi tên một người nói (vd. "Speaker A" → "Lan"), giọng đó được lưu. Ở video sau, người đó được <b>tự nhận ra</b> (dấu ✓ cạnh tên). Quản lý giọng đã lưu trong Settings.</td></tr>
-  <tr><td><span class="step">7</span> Tag speaker</td><td>Cắt clip tại chỗ đổi người nói, đặt tên và tô màu clip theo người. <b>New sequence — exact</b>: dựng sequence mới, cắt đúng frame, không đụng nhạc nền / B-roll. <b>In place</b>: sửa trực tiếp sequence đang mở.</td></tr>
-  <tr><td><span class="step">8</span> Phụ đề</td><td><b>Make subtitle</b>: tạo caption trên timeline (chọn bản gốc + các bản dịch). <b>Export SRT</b>: lưu file. Kiểu xuống dòng theo "Display mode" của Segments; thời gian lấy theo từng từ.</td></tr>
-  <tr><td><span class="step">9</span> Dịch</td><td>Trong Segments → tab <b>Translation</b>: thêm ngôn ngữ đích rồi bấm Translate. Chọn bộ dịch trong Settings (NLLB-200 offline, Ollama, Hy-MT2 hoặc Claude API).</td></tr>
-  <tr><td><span class="step">10</span> Beats</td><td>Tab <b>Beats</b>: dò nhịp nhạc, chọn khoảng cách marker (1/4 nhịp → 4 ô nhịp), xem trước trên sóng âm rồi gắn marker lên clip hoặc timeline.</td></tr>
+  <tr><td><span class="step">2</span> Tách giọng / nhạc <span class="pill">MỚI</span></td><td>Bấm <b>Separate voice / music…</b> → chọn <b>Voice only</b> (bỏ nhạc, giữ lời — để phiên âm) hoặc <b>Music only</b> (bỏ lời, giữ nhạc — để dò nhịp). Audio đã tách thay vào sóng âm, phát lại, phiên âm và Beats. Thanh <b>Original | Voice | Music</b> chuyển qua lại tức thì. Lần đầu tải model ~870&nbsp;MB.</td></tr>
+  <tr><td><span class="step">3</span> Đưa lên timeline <span class="pill">MỚI</span></td><td><b>Import voice / music to timeline</b>: đặt bản đã tách <b>đúng timecode gốc</b> trên track audio đầu tiên còn trống suốt đoạn đó (không bao giờ đè lên audio có sẵn, bỏ qua track bị khóa). Nếu mọi track đều có audio ở đoạn đó, panel tự thêm một track mới. File được lưu vào thư mục <code>EasyScript Stems</code> trong Export folder và bin <b>EasyScript Stems</b> của project.</td></tr>
+  <tr><td><span class="step">4</span> Detect silence</td><td>Tab <b>Cut</b>: phát hiện khoảng lặng, chỉnh padding / ngưỡng dB / độ dài tối thiểu và xem trước trên sóng âm.</td></tr>
+  <tr><td><span class="step">5</span> Cắt</td><td><b>Apply cut</b>: cắt trực tiếp trên timeline. <b>Cut to new sequence</b>: dựng một sequence mới đã cắt trong một bước (khuyên dùng cho video dài, sequence gốc giữ nguyên).</td></tr>
+  <tr><td><span class="step">6</span> Transcribe</td><td>Tab <b>Transcript</b>: chọn <b>Model</b> (mặc định <b>Turbo</b> — chính xác và nhanh) và <b>Language</b>. Ô <b>Vocabulary</b>: nhập tên riêng, thương hiệu, thuật ngữ để nhận dạng đúng hơn. Với bài hát / video có nhạc nền: tách <b>Voice only</b> trước (hoặc bật <b>Song mode</b>) để lời rõ hơn.</td></tr>
+  <tr><td><span class="step">7</span> Speakers</td><td>Phân biệt người nói — <b>không cần tài khoản hay token</b>. Câu có 2 người nói sẽ được tách đúng chỗ. Bấm vào tag người nói để <b>đổi tên</b>, <b>chuyển câu sang người khác</b> hoặc tạo người mới; đặt trùng tên sẽ gộp hai người.</td></tr>
+  <tr><td><span class="step">8</span> Nhớ giọng</td><td>Khi bạn đổi tên một người nói (vd. "Speaker A" → "Lan"), giọng đó được lưu. Ở video sau, người đó được <b>tự nhận ra</b> (dấu ✓ cạnh tên). Quản lý giọng đã lưu trong Settings.</td></tr>
+  <tr><td><span class="step">9</span> Tag speaker</td><td>Cắt clip tại chỗ đổi người nói, đặt tên và tô màu clip theo người. <b>New sequence — exact</b>: dựng sequence mới, cắt đúng frame, không đụng nhạc nền / B-roll. <b>In place</b>: sửa trực tiếp sequence đang mở.</td></tr>
+  <tr><td><span class="step">10</span> Phụ đề</td><td><b>Make subtitle</b>: tạo caption trên timeline (chọn bản gốc + các bản dịch). <b>Export SRT</b>: lưu file. Kiểu xuống dòng theo "Display mode" của Segments; thời gian lấy theo từng từ.</td></tr>
+  <tr><td><span class="step">11</span> Dịch</td><td>Trong Segments → tab <b>Translation</b>: thêm ngôn ngữ đích rồi bấm Translate. Chọn bộ dịch trong Settings (NLLB-200 offline, Ollama, Hy-MT2 hoặc Claude API).</td></tr>
+  <tr><td><span class="step">12</span> Beats</td><td>Tab <b>Beats</b>: dò nhịp (nên dùng bản <b>Music only</b>), chọn khoảng cách marker (1/4 nhịp → 4 ô nhịp), xem trước trên sóng âm rồi gắn marker. <b>Add to → Timeline</b>: marker trên sequence. <b>Add to → Selected clip</b>: marker gắn vào <b>clip đang chọn trên timeline</b> (vd. clip nhạc vừa import) và di chuyển theo clip; nếu không chọn clip nào, marker vào clip của audio đang nạp trong panel.</td></tr>
 </table>
 
 <h2>4. Settings (nút ⚙)</h2>
 <ul>
-  <li><b>Export folder</b>: nơi lưu file SRT / XML.</li>
+  <li><b>Export folder</b>: nơi lưu file SRT / XML và các bản tách giọng / nhạc đã import (thư mục con <code>EasyScript Stems</code>). Đừng xóa các file này khi project còn dùng.</li>
   <li><b>Speakers</b>: danh sách giọng đã lưu (xóa được từng giọng). Tuỳ chọn trong "Speaker options" ở tab Transcript: số người nói biết trước, độ nhạy, tốc độ, nhận diện giọng đã lưu.</li>
   <li><b>Translation</b>: chọn bộ dịch. <b>NLLB-200</b> chạy offline: bấm <b>Download</b> một lần (~2,4&nbsp;GB, sau đó tự tối ưu cho máy); Ollama / Hy-MT2 chạy local; Claude API cần API key.</li>
 </ul>
@@ -83,14 +91,16 @@
 <h2>5. Xử lý sự cố</h2>
 <table>
   <tr><th>Hiện tượng</th><th>Cách khắc phục</th></tr>
-  <tr><td>Không thấy "EasyScript" trong Extensions</td><td>Chạy lại file cài, rồi <b>thoát hẳn &amp; mở lại Premiere</b>.</td></tr>
-  <tr><td>Góc panel báo <b>Offline</b> mãi</td><td>Backend chưa chạy. Đóng / mở lại panel (panel tự khởi động backend). Lần đầu có thể mất vài phút.</td></tr>
-  <tr><td>Lần đầu bấm Speakers hơi lâu</td><td>Bình thường: nạp model lần đầu (~10–20 giây). Các lần sau nhanh.</td></tr>
-  <tr><td>Phiên âm / dịch lần đầu lâu</td><td>Đang tải model (cần mạng). Chỉ một lần.</td></tr>
+  <tr><td>Không thấy "EasyScript" trong Extensions</td><td>Cách 1: chạy lại file cài. Cách 2: cài lại file .zxp bằng trình cài ZXP. Sau đó <b>thoát hẳn &amp; mở lại Premiere</b>.</td></tr>
+  <tr><td>Góc panel báo <b>Offline</b> mãi</td><td>Backend chưa chạy. Kiểm tra file backend nằm đúng đường dẫn ở mục 2 (Cách 2). Trên Mac, chạy lại lệnh <code>xattr</code> ở trên. Rồi đóng / mở lại panel. Lần đầu có thể mất vài phút.</td></tr>
+  <tr><td>Lần đầu bấm Speakers / Separate hơi lâu</td><td>Bình thường: tải và nạp model lần đầu. Các lần sau nhanh.</td></tr>
+  <tr><td>Tách giọng / nhạc chậm</td><td>Máy không có GPU sẽ chạy bằng CPU (vài lần thời lượng audio). Dòng tiến trình ghi thiết bị đang dùng (vd. <b>GPU · Metal</b>, <b>GPU · DirectML</b>, <b>CPU</b>).</td></tr>
+  <tr><td>Import to timeline tạo thêm track mới</td><td>Đúng thiết kế: mọi track audio đều đã có audio ở đoạn đó (hoặc bị khóa), nên panel thêm track để không ghi đè.</td></tr>
+  <tr><td>Marker "Selected clip" vào nhầm clip</td><td>Chọn đúng clip cần gắn trên timeline trước khi bấm <b>Add markers</b>. Dòng trạng thái ghi tên clip đã được gắn.</td></tr>
   <tr><td>Phân biệt sai số người nói</td><td>Nhập <b>Known speakers</b> (số người) hoặc đổi <b>Sensitivity</b> trong "Speaker options"; có thể sửa tay bằng cách bấm vào tag người nói.</td></tr>
 </table>
 
-<div class="box warn"><b>Lưu ý:</b> EasyScript không sửa file gốc của bạn. Mọi thao tác cắt/đổi tên đều áp lên clip trên timeline; bạn có thể Undo (Cmd/Ctrl&nbsp;+&nbsp;Z) bất cứ lúc nào.</div>
+<div class="box warn"><b>Lưu ý:</b> EasyScript không sửa file gốc của bạn. Mọi thao tác cắt/đổi tên đều áp lên clip trên timeline; bản tách giọng / nhạc là file mới. Bạn có thể Undo (Cmd/Ctrl&nbsp;+&nbsp;Z) bất cứ lúc nào.</div>
 
 <p class="foot">EasyScript for Premiere Pro — Hướng dẫn người dùng. © EasyScript. Mọi quyền được bảo lưu.</p>
 

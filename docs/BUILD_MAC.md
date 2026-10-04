@@ -1,8 +1,8 @@
-# Build EasyScript 2.2 trên macOS (Apple Silicon)
+# Build EasyScript 2.3 trên macOS (Apple Silicon)
 
-Hướng dẫn build lại **backend** cho Mac từ code hiện tại (bản 2.2: Turbo + word timing, speaker community-1, voice library, NLLB trên CTranslate2) và đóng gói bản phát hành.
+Hướng dẫn build lại **backend** cho Mac từ code hiện tại (bản 2.3: Turbo + word timing, speaker community-1, voice library, NLLB trên CTranslate2, tách giọng / nhạc Mel-Band RoFormer chạy MLX) và đóng gói bản phát hành.
 
-> Panel (`.zxp`) **không cần build lại trên Mac**: file `dist/EasyScript-Premiere.zxp` 2.2.0 build trên Windows dùng được cho cả hai hệ điều hành. Chỉ có backend là phải build riêng cho từng máy.
+> Panel (`.zxp`) là **một file dùng chung** cho cả Mac và Windows, build ở máy nào cũng được (`cep-extension-v2.1/package_zxp.sh` trên Mac, cần `ZXPSignCmd` + `easyscript_cert.p12`). Chỉ có backend là phải build riêng cho từng hệ điều hành.
 
 ---
 
@@ -17,13 +17,13 @@ Hướng dẫn build lại **backend** cho Mac từ code hiện tại (bản 2.2
 
 ### Lấy code
 
-Code 2.2 nằm trên nhánh `main` của GitHub (tag `v2.2.0`). Trên Mac:
+Code nằm trên nhánh `main` của GitHub. Trên Mac:
 
 ```bash
 cd ~/EasyScript_APP          # thư mục repo có sẵn trên Mac
 git checkout main
 git pull
-git log --oneline -1         # phải thấy commit 2.2 (vd. "Release readiness…" hoặc mới hơn)
+git log --oneline -1         # commit mới nhất của main
 ```
 
 Nếu repo trên Mac có thay đổi chưa commit (file .DS_Store, venv…), `git status` trước; các thư mục `backend/venv`, `backend/bin` đã được git bỏ qua nên không ảnh hưởng.
@@ -150,7 +150,7 @@ cp -R backend/dist_backend/EasyScript-backend/. ~/.easyscript/backend/
 xattr -dr com.apple.quarantine ~/.easyscript/backend
 ```
 
-Cài panel 2.2.0 (`dist/EasyScript-Premiere.zxp`) bằng ZXP installer, mở lại Premiere. Panel tự khởi động backend.
+Cài panel (`dist/EasyScript-Premiere.zxp`, bản 2.3.0) bằng ZXP installer, mở lại Premiere. Panel tự khởi động backend.
 
 ---
 
@@ -160,12 +160,14 @@ Cài panel 2.2.0 (`dist/EasyScript-Premiere.zxp`) bằng ZXP installer, mở l�
 ./scripts/make_release.sh                         # ký ZXP (cần ZXPSignCmd + .p12) và tạo release/EasyScript/
 cp -R backend/dist_backend/EasyScript-backend/. release/EasyScript/backend/
 rm release/EasyScript/backend/PUT-BACKEND-BUILD-HERE.txt
-cd release && ditto -c -k --keepParent EasyScript EasyScript-2.2-macOS.zip
+cd release && ditto -c -k --keepParent EasyScript EasyScript-2.3-macOS.zip
 ```
 
 Dùng `ditto` (không dùng Finder/zip thường) để giữ quyền thực thi và symlink trong bản build. Người dùng giải nén và chạy `install-mac.command`.
 
-Nếu không có ZXPSignCmd/.p12 trên Mac: bỏ dòng ký trong `make_release.sh` và copy sẵn `dist/EasyScript-Premiere.zxp` (bản 2.2.0 từ Windows) vào `release/EasyScript/`.
+Nếu không có ZXPSignCmd/.p12 trên Mac: bỏ dòng ký trong `make_release.sh` và copy sẵn `dist/EasyScript-Premiere.zxp` (build ở máy khác) vào `release/EasyScript/`.
+
+Thư mục phát hành hỗ trợ 2 cách cài (xem hướng dẫn người dùng): chạy `install-mac.command`, hoặc cài `.zxp` bằng ZXP installer rồi chép nội dung `backend/` vào `~/.easyscript/backend` và chạy `xattr -dr com.apple.quarantine ~/.easyscript/backend`.
 
 ---
 
