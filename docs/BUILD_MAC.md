@@ -17,20 +17,16 @@ Hướng dẫn build lại **backend** cho Mac từ code hiện tại (bản 2.2
 
 ### Lấy code
 
-Code 2.2 nằm ở nhánh `fix/extendscript-json-polyfill` (commit `7ad4ea0` trở về sau) và **phải được push lên GitHub trước** (nhánh này chưa có trên `origin`). Trên Windows:
-
-```bash
-git push -u origin fix/extendscript-json-polyfill
-```
-
-Trên Mac:
+Code 2.2 nằm trên nhánh `main` của GitHub (tag `v2.2.0`). Trên Mac:
 
 ```bash
 cd ~/EasyScript_APP          # thư mục repo có sẵn trên Mac
-git fetch origin
-git checkout fix/extendscript-json-polyfill
+git checkout main
 git pull
+git log --oneline -1         # phải thấy commit 2.2 (vd. "Release readiness…" hoặc mới hơn)
 ```
+
+Nếu repo trên Mac có thay đổi chưa commit (file .DS_Store, venv…), `git status` trước; các thư mục `backend/venv`, `backend/bin` đã được git bỏ qua nên không ảnh hưởng.
 
 Nếu không dùng GitHub thì copy cả thư mục repo, **trừ** các thư mục chỉ dùng cho Windows: `backend/venv-win`, `backend/build_backend`, `backend/dist_backend`, `backend/models`.
 
