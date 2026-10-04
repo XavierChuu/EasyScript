@@ -402,6 +402,7 @@ const progressTracker = {
     container.classList.remove("hidden");
     this.startTime = Date.now();
     this.lastProgress = 0;
+    this._samples = [];
     this._cancelled = false;
     this.update(0, "preparing", "Preparing...");
   },
@@ -444,13 +445,24 @@ const progressTracker = {
     stageEl.textContent = detail || stage;
     stageEl.classList.toggle("error", stage === "error");
 
-    const elapsed = (Date.now() - this.startTime) / 1000;
+    const now = Date.now();
+    const elapsed = (now - this.startTime) / 1000;
     elapsedEl.textContent = `⏱ ${this.formatDuration(elapsed)}`;
 
-    if (progress > 0.05 && progress < 1) {
-      const rate = progress / elapsed;
-      const remaining = (1 - progress) / rate;
+    // Rate over the last ~60 s, not since the start: early stages (model
+    // download, decoding) run at a very different pace than the main one.
+    const samples = this._samples || (this._samples = []);
+    if (samples.length && progress < samples[samples.length - 1][1]) samples.length = 0;
+    samples.push([now, progress]);
+    while (samples.length > 2 && now - samples[1][0] >= 60000) samples.shift();
+    const [t0, p0] = samples[0];
+    const span = (now - t0) / 1000;
+
+    if (progress > 0.05 && progress < 1 && progress > p0 && span >= 3) {
+      const remaining = (1 - progress) * span / (progress - p0);
       etaEl.textContent = `~${this.formatDuration(remaining)} left`;
+    } else if (progress > 0.05 && progress < 1) {
+      etaEl.textContent = "Estimating...";
     } else if (progress >= 1) {
       etaEl.textContent = `Done in ${this.formatDuration(elapsed)}`;
     } else {
@@ -462,6 +474,10 @@ const progressTracker = {
 
   formatDuration(sec) {
     if (sec < 60) return `${Math.round(sec)}s`;
+    if (sec >= 3600) {
+      const h = Math.floor(sec / 3600);
+      return `${h}h ${String(Math.floor((sec % 3600) / 60)).padStart(2, "0")}m`;
+    }
     const m = Math.floor(sec / 60);
     const s = Math.round(sec % 60);
     return `${m}m ${String(s).padStart(2, "0")}s`;
