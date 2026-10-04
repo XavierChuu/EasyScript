@@ -359,6 +359,23 @@ a = Analysis(
     noarchive=False,
 )
 
+# libmlx.dylib links @rpath/libjaccl.dylib but carries no rpath of its own, so
+# PyInstaller resolves it through the dyld fallback paths. On a Mac with
+# Homebrew's mlx (pulled in by ollama) that picks /opt/homebrew/lib/libjaccl.dylib
+# from another mlx version: `import mlx.core` then fails with a missing symbol and
+# Whisper silently drops to CPU. Use the copy a Python package ships instead.
+_pkg_libs = {os.path.basename(src): src for _, src, typ in a.binaries
+             if typ == "BINARY" and not src.startswith(("/opt/homebrew/", "/usr/local/"))}
+_fixed = []
+for dest, src, typ in a.binaries:
+    if src.startswith(("/opt/homebrew/", "/usr/local/")):
+        alt = _pkg_libs.get(os.path.basename(src))
+        print(f"[spec] system lib {src} -> {alt or 'kept (no packaged copy)'}")
+        if alt:
+            src = alt
+    _fixed.append((dest, src, typ))
+a.binaries = _fixed
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(

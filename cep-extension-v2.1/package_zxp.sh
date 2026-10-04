@@ -27,6 +27,7 @@ rsync -a \
   --exclude "install.sh" \
   --exclude "install.bat" \
   --exclude "package_zxp.sh" \
+  --exclude "package_zxp.ps1" \
   --exclude "ZXPSignCmd" \
   --exclude "*.zxp" \
   --exclude "*.p12" \

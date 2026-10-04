@@ -176,3 +176,5 @@ Nếu không có ZXPSignCmd/.p12 trên Mac: bỏ dòng ký trong `make_release.s
 | "DLL/dylib load failed …" khi import | Gói thiếu thư viện đi kèm; chạy lại build, kiểm tra cảnh báo của PyInstaller |
 | Lần Speakers đầu tiên chậm (~10 s) | Bình thường: dựng cache font matplotlib (lưu ở `~/.easyscript/matplotlib`, chỉ một lần) |
 | Gatekeeper chặn backend | `xattr -dr com.apple.quarantine ~/.easyscript/backend` |
+| `python3.11 -m venv` lỗi `ensurepip` / `pyexpat … Symbol not found: _XML_SetAllocTrackerActivationThreshold` | Python 3.11 của Homebrew không khớp `libexpat` của macOS mới. Dùng Python 3.11 khác (pyenv: `~/.pyenv/versions/3.11.x/bin/python3.11 -m venv backend/venv`, hoặc bản python.org) |
+| Transcribe ghi **CPU** thay vì Metal; log có `MLX not available … Symbol not found: __ZN5jaccl…` | PyInstaller lấy nhầm `libjaccl.dylib` của mlx Homebrew (cài kèm ollama). Spec đã tự thay bằng bản trong venv — khi build phải thấy dòng `[spec] system lib /opt/homebrew/lib/libjaccl.dylib -> …/site-packages/mlx/lib/libjaccl.dylib` |
