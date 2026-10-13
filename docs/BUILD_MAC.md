@@ -124,7 +124,7 @@ Rồi mở panel trong trình duyệt nối vào cổng đó: phục vụ `cep-e
 | Tag speaker → New sequence | Sequence mới, clip cắt tại chỗ đổi người, đặt tên theo người, nhạc nền không bị cắt |
 | Translate → NLLB | Download lần đầu ~2,4 GB rồi "Optimizing…". Trên Mac chạy CPU (CTranslate2 không có Metal): ~0,7 giây/câu |
 | Separate voice / music | Lần đầu hỏi tải model ~870 MB. Tiến trình ghi **GPU · Metal**; bài 3 phút ≈ 30 s trên M5. Waveform đổi sang stem, chuyển Original / Voice / Music tức thì |
-| Import stem vào timeline | File chép vào `<thư mục export>/EasyScript Stems`, nằm đúng timecode gốc trên track audio trống đầu tiên; mọi track đều có audio ở đoạn đó → thêm track stereo mới |
+| Import stem vào timeline | File chép vào `<thư mục project>/EasyScript/Stems`, nằm đúng timecode gốc trên track audio trống đầu tiên; mọi track đều có audio ở đoạn đó → thêm track stereo mới |
 | Song mode | Đã có model tách (dùng Separate một lần) → dùng nó trên GPU; chưa có → Demucs tải model lần đầu. Rồi transcribe lời bài hát |
 | Detect silence / Cut / Beats / XML | Như bản 2.1 |
 

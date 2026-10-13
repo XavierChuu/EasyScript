@@ -67,12 +67,21 @@
   mode reuses them when the model is present (else Demucs).
 - Stems input is full quality: the clip's source media range, or a 48 kHz
   stereo render (`presets/WAV_Stereo_16bit_48kHz.epr`) — never the 16 kHz
-  analysis file. Import copies the stem to `<export dir>/EasyScript Stems` and
+  analysis file. Import copies the stem to `<project folder>/EasyScript/Stems`
+  (`<export dir>/EasyScript Stems` for an unsaved project; cut XML likewise goes to
+  `<project folder>/EasyScript`, `_work_dir` in server.py) and
   `esPlaceStem` lays it at the loaded range's start ticks on the first unlocked
   audio track free for its whole length; when none is, `esAddAudioTrack` (QE)
   appends a stereo track in a separate evalScript call, then it retries.
 - GPU first for every heavy task; CPU only as a fallback or where measured
   faster (NLLB: CTranslate2 int8 on the CPU beats transformers on MPS 2x).
+
+## Session
+- One loaded analysis drives several sequences (`sessionSeqs` in index.js): the
+  one it was loaded from plus those built from it (Cut to new sequence, Tag
+  speaker), each with its own applied cuts. `ensureSameSequence` /
+  `syncActiveSequence` point `cutsApplied` / `lastAppliedCuts` / `loadedClipInfo`
+  at Premiere's active one, so switching sequences never needs a reload.
 
 ## Frame math
 - Always use the sequence's ticks-per-frame (`seq.timebase`; 254016000000

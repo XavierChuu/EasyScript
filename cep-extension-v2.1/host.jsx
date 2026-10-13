@@ -1073,6 +1073,16 @@ function esPlaceStem(dataJson) {
     }
 }
 
+/** Folder of the open .prproj, or "" while the project was never saved. */
+function esProjectDir() {
+    try {
+        var p = app.project.path;
+        if (!p) return "";
+        var f = new File(p);
+        return f.exists ? f.parent.fsName : "";
+    } catch (e) { return ""; }
+}
+
 /**
  * Export the active sequence as FCP XML into ~/.easyscript/xml.
  * Returns JSON {ok, path, name, sequenceID, ticksPerFrame}.

@@ -350,6 +350,33 @@ function snapCutsToFrames(cuts, tb = seqTimebase) {
 let lastAppliedCuts = null;
 // True once cuts were removed from the active sequence (in place or via XML).
 let cutsApplied = false;
+// One analysis drives several sequences: the one the audio was loaded from and
+// those built from it (Cut to new sequence, Tag speaker). Each keeps its own
+// applied cuts, so switching between them in Premiere keeps the session —
+// e.g. back to the original to Apply cut there after a Cut to new sequence.
+// The two globals above always mirror the session's active sequence.
+let sessionSeqs = {};   // sequenceID → { cuts: [{start, end}] | null, nodeId }
+
+function rememberSequence(id, cuts, nodeId) {
+  if (id) sessionSeqs[String(id)] = { cuts: cuts && cuts.length ? cuts : null, nodeId: nodeId || "" };
+}
+
+/** Make the session follow Premiere's active sequence when it is one of ours.
+ *  Returns {known, tb} (tb = its timebase), or null outside Premiere. */
+async function syncActiveSequence() {
+  if (!window.bridge || !bridge.available() || !loadedClipInfo) return null;
+  const tb = await bridge.sequenceTimebase();
+  const st = sessionSeqs[String(tb.sequenceID)];
+  if (!st) return { known: false, tb };
+  if (String(loadedClipInfo.sequenceID) !== String(tb.sequenceID)) {
+    loadedClipInfo.sequenceID = String(tb.sequenceID);
+    loadedClipInfo.nodeId = st.nodeId;
+    try { beatUI.render(); } catch (e) {}
+  }
+  cutsApplied = !!st.cuts;
+  lastAppliedCuts = st.cuts;
+  return { known: true, tb };
+}
 
 /** Applied cuts if any, else what Apply would cut now. */
 function effectiveCuts() {
@@ -371,20 +398,30 @@ function analysisToSeqTime(t) {
   return seqStart + t - (cutsApplied && lastAppliedCuts ? removedBeforeTime(t, lastAppliedCuts) : 0);
 }
 
-/** Throw if the user switched to a different sequence since loading the audio. */
+/** Follow the active sequence, or throw when it isn't the one the audio was
+ *  loaded from nor one built from it. */
 async function ensureSameSequence() {
   if (!window.bridge || !bridge.available() || !loadedClipInfo || !loadedClipInfo.sequenceID) return;
-  const tb = await bridge.sequenceTimebase();
-  if (String(tb.sequenceID) !== String(loadedClipInfo.sequenceID)) {
-    throw new Error(`The active sequence is "${tb.name}", not the one the audio was loaded from. Switch back or load the audio again.`);
+  const r = await syncActiveSequence();
+  if (r && !r.known) {
+    throw new Error(`The active sequence is "${r.tb.name}" — not the one the audio was loaded from, nor one EasyScript built from it. Switch back or load the audio again.`);
   }
+}
+
+/** Folder of the open Premiere project ("" if unsaved or outside Premiere). */
+async function projectDir() {
+  try { return window.bridge && bridge.available() ? await bridge.projectDir() : ""; } catch (e) { return ""; }
 }
 
 /** Move Premiere's playhead to an analysis time (best effort). */
 function syncPremierePlayhead(t) {
   if (!window.bridge || !bridge.available() || !loadedClipInfo) return;
-  const ticks = frameToTicks(secToFrameRound(analysisToSeqTime(t)));
-  bridge.setPlayerPosition(ticks).catch(() => {});
+  // The active sequence may be the original or a cut one: map for that one.
+  syncActiveSequence().catch(() => null).then((r) => {
+    if (r && !r.known) return;
+    const ticks = frameToTicks(secToFrameRound(analysisToSeqTime(t)));
+    return bridge.setPlayerPosition(ticks);
+  }).catch(() => {});
 }
 
 // ── Progress Tracker ──
@@ -2806,6 +2843,7 @@ function resetAnalysisState() {
   audioDuration = 0;
   cutsApplied = false;
   lastAppliedCuts = null;
+  sessionSeqs = {};
   try { waveform.clear(); } catch (e) {}
   try { beatUI.reset(); } catch (e) {}
   try { renderSegments([]); } catch (e) {}
@@ -2887,6 +2925,7 @@ async function loadAudioFromTimeline() {
       // for voice / music separation.
       seqStartTicks, renderStart: clip.start || 0, renderEnd: clip.end || 0,
     };
+    rememberSequence(loadedClipInfo.sequenceID, null, loadedClipInfo.nodeId);
     waveform.setFrameRate(seqTimebase.fps);
 
     const modeLabel = { entire: "entire sequence", inout: "in/out", selected: "selected clip" }[mode] || mode;
@@ -2907,10 +2946,6 @@ async function applyCutsToTimeline() {
   if (!currentAudioPath) { showStatus("Load audio from the timeline first.", true); return; }
   const cuts = getFilteredCutPoints();
   if (cuts.length === 0) { showStatus("No cuts to apply. Run Detect silence first.", true); return; }
-  if (cutsApplied) {
-    showStatus("Cuts were already applied to this sequence. Load the audio again to analyse the edited timeline.", true);
-    return;
-  }
 
   const btn = getBtn("applyCutBtn");
   const label = btn ? btn.textContent : "";
@@ -2918,6 +2953,9 @@ async function applyCutsToTimeline() {
   try {
     if (!window.bridge || !bridge.available()) throw new Error("Not running inside Premiere Pro.");
     await ensureSameSequence();
+    if (cutsApplied) {
+      throw new Error("This sequence is already cut. Switch to the original sequence, or load the audio again to analyse the edited timeline.");
+    }
     const tb = await refreshTimebase();
     lastAppliedFps = tb.fps;
 
@@ -2934,6 +2972,7 @@ async function applyCutsToTimeline() {
     if (r.extracted > 0) {
       cutsApplied = true;  // timeline shifted — Tag speaker / markers / subtitles compensate
       lastAppliedCuts = frameCuts.map(c => ({ start: c.start, end: c.end }));
+      rememberSequence(loadedClipInfo.sequenceID, lastAppliedCuts, loadedClipInfo.nodeId);
     }
     const removed = frameCuts.reduce((a, c) => a + (c.end - c.start), 0);
     showStatus(`Removed ${r.extracted} of ${r.total} regions (−${formatTime(removed)}) in ${secs}s` +
@@ -2961,8 +3000,8 @@ async function exportCutXML() {
   if (btn) { btn.disabled = true; btn.textContent = "Exporting…"; }
   try {
     if (!window.bridge || !bridge.available()) throw new Error("Not running inside Premiere Pro.");
-    if (cutsApplied) throw new Error("The active sequence is already cut — load the audio again before cutting it.");
     await ensureSameSequence();
+    if (cutsApplied) throw new Error("This sequence is already cut. Switch to the original sequence, or load the audio again before cutting it.");
     const tb = await refreshTimebase();
     const frameCuts = snapCutsToFrames(cuts, tb);
     if (frameCuts.length === 0) { showStatus("No cut is at least one frame long within the clip.", true); return; }
@@ -2975,6 +3014,7 @@ async function exportCutXML() {
       body: JSON.stringify({
         xml_path: exported.path,
         cuts_ticks: frameCuts.map(c => [frameToTicks(c.f0, tb), frameToTicks(c.f1, tb)]),
+        project_dir: await projectDir(),   // XML goes to <project folder>/EasyScript
       }),
     });
 
@@ -2982,18 +3022,16 @@ async function exportCutXML() {
     if (document.getElementById("xmlImportCheck")?.checked) {
       if (btn) btn.textContent = "Importing…";
       opened = await bridge.importSequenceXML(res.path, res.name);
-      // The new, already-cut sequence is now active: subtitles, Tag speaker and
-      // beat markers target it from here on.
-      cutsApplied = true;
-      lastAppliedCuts = frameCuts.map(c => ({ start: c.start, end: c.end }));
-      loadedClipInfo.sequenceID = opened.sequenceID;
-      loadedClipInfo.nodeId = "";  // imported clips are new project items
-      beatUI.render();
+      // The new, already-cut sequence joins the session and is active now;
+      // the original stays in it uncut (switch back to Apply cut there too).
+      // Imported clips are new project items, hence no nodeId.
+      rememberSequence(opened.sequenceID, frameCuts.map(c => ({ start: c.start, end: c.end })), "");
+      await syncActiveSequence();
     }
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     const warn = (res.warnings || []).join(" · ");
     showStatus(`${opened ? `Opened "${opened.name}"` : "XML saved"} — ${res.cuts} cuts, −${formatTime(res.removed_seconds)}, ` +
-      `${res.clips_after} clips, ${secs}s · ${res.path}${warn ? " · " + warn : ""}`, false, "DONE");
+      `${res.clips_after} clips, ${secs}s · XML: ${res.path}${warn ? " · " + warn : ""}`, false, "DONE");
   } catch (err) {
     showStatus(`Cut to new sequence failed: ${err.message}`, true);
   } finally {
@@ -3073,6 +3111,7 @@ async function createSelectedSubtitles(langs) {
   const baseName = loadedClipInfo ? loadedClipInfo.name.replace(/\.[^.]+$/, "") : "easyscript";
   let imported = 0, placed = 0, why = "";
   try {
+    await syncActiveSequence().catch(() => null);
     // Captions start where the analysed audio starts on the timeline.
     const startSec = (loadedClipInfo && loadedClipInfo.seqStart) || 0;
     for (const lang of langs) {
@@ -3159,12 +3198,14 @@ async function labelSpeakerClips() {
           xml_path: exported.path, cuts_ticks: [], splits_ticks: changes.map(toTicks), labels,
           only_media: loadedClipInfo && loadedClipInfo.sourcePath ? [loadedClipInfo.sourcePath] : [],
           name_suffix: " (speakers)", file_label: "EasyScript speakers",
+          project_dir: await projectDir(),
         }),
       });
       if (btn) btn.textContent = "Importing…";
       const opened = await bridge.importSequenceXML(res.path, res.name);
-      loadedClipInfo.sequenceID = opened.sequenceID;
-      loadedClipInfo.nodeId = "";  // imported clips are new project items
+      // Same cuts as the sequence it was built from; new project items (no nodeId).
+      rememberSequence(opened.sequenceID, lastAppliedCuts, "");
+      await syncActiveSequence();
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       showStatus(`Opened "${opened.name}" — ${res.splits} speaker edits, ${res.labeled} clips named, ${secs}s`, false, "DONE");
       return;

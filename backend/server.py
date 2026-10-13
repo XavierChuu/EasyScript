@@ -569,6 +569,23 @@ class SeparateRequest(BaseModel):
 class StemExportRequest(BaseModel):
     path: str                # vocals.wav / music.wav from a /separate result
     name: str                # file name without extension, e.g. "Interview - Voice"
+    project_dir: str = ""    # folder of the open .prproj ("" = unsaved project)
+
+
+def _work_dir(project_dir, sub, fallback):
+    """Where files that a Premiere project will reference go: <project folder>/
+    EasyScript[/sub] when the project is saved (and writable), else `fallback`
+    (in the export folder)."""
+    if project_dir and os.path.isdir(project_dir):
+        d = os.path.join(project_dir, "EasyScript", sub) if sub else os.path.join(project_dir, "EasyScript")
+        try:
+            os.makedirs(d, exist_ok=True)
+            if os.access(d, os.W_OK):
+                return d
+        except OSError:
+            pass
+    os.makedirs(fallback, exist_ok=True)
+    return fallback
 
 
 def _stems_key(path, start, duration):
@@ -660,13 +677,13 @@ def separate_stems(req: SeparateRequest):
 
 @app.post("/separate/export")
 def export_stem(req: StemExportRequest):
-    """Copy a cached stem into <export folder>/EasyScript Stems for importing."""
+    """Copy a cached stem next to the project (<project>/EasyScript/Stems, else
+    <export folder>/EasyScript Stems) for importing."""
     src = os.path.abspath(req.path)
     if os.path.commonpath([src, os.path.abspath(STEMS_DIR)]) != os.path.abspath(STEMS_DIR) \
             or not os.path.isfile(src):
         return JSONResponse(status_code=400, content={"error": "Not a separated stem"})
-    folder = os.path.join(export_dir, "EasyScript Stems")
-    os.makedirs(folder, exist_ok=True)
+    folder = _work_dir(req.project_dir, "Stems", os.path.join(export_dir, "EasyScript Stems"))
     base = xml_cut.safe_filename(req.name, "Stem")
     dst = os.path.join(folder, base + ".wav")
     n = 2
@@ -687,6 +704,7 @@ class XmlCutRequest(BaseModel):
     labels: list = []                  # [{start_ticks, end_ticks, name, color}] clip names/colours
     only_media: list = []              # splits/labels only on clips of these files (+ linked)
     file_label: str = "EasyScript cut"
+    project_dir: str = ""              # folder of the open .prproj → XML in <it>/EasyScript
 
 
 @app.post("/xml/cut")
@@ -709,7 +727,8 @@ def xml_cut_sequence(req: XmlCutRequest):
     except Exception:
         seq_name = "Sequence"
     tag = xml_cut.safe_filename(req.file_label, "EasyScript cut")
-    dst = os.path.join(export_dir, f"{xml_cut.safe_filename(seq_name)} - {tag} {stamp}.xml")
+    dst = os.path.join(_work_dir(req.project_dir, "", export_dir),
+                       f"{xml_cut.safe_filename(seq_name)} - {tag} {stamp}.xml")
     try:
         result = xml_cut.cut_sequence_xml(src, dst, cuts, name_suffix=req.name_suffix,
                                           splits_ticks=splits, labels=labels,

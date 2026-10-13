@@ -10,7 +10,8 @@
  * Stems cover exactly the loaded range, so every existing analysis (segments,
  * cuts, beats) keeps its timing.
  *
- * "Import to timeline" copies the stem to the export folder and lays it at the
+ * "Import to timeline" copies the stem next to the project (<project folder>/
+ * EasyScript/Stems; the export folder for an unsaved project) and lays it at the
  * range's original sequence time on the first audio track that is empty there
  * (adding a track when none is), so nothing is overwritten.
  *
@@ -165,7 +166,7 @@
       var tb = await refreshTimebase();
       var name = (info.name || "Audio").replace(/\.[^.]+$/, "") + " - " + LABEL[which];
       var copy = await fetchBackend("/separate/export", {
-        method: "POST", body: JSON.stringify({ path: state.stems[which], name: name }),
+        method: "POST", body: JSON.stringify({ path: state.stems[which], name: name, project_dir: await projectDir() }),
       });
       var startTicks = info.seqStartTicks != null ? info.seqStartTicks
         : frameToTicks(secToFrameRound(info.seqStart || 0, tb), tb);

@@ -87,6 +87,16 @@ class EndpointTest(unittest.TestCase):
         self.assertEqual(os.path.dirname(res["path"]), self.tmp)   # saved to the export folder
         self.assertEqual(res["clips_after"], 9)
 
+        # A saved project: the XML goes to <project folder>/EasyScript instead.
+        proj = tempfile.mkdtemp()
+        r = self.client.post("/xml/cut", headers=H, json={
+            "xml_path": src, "cuts_ticks": [[100 * TPF25, 150 * TPF25]], "project_dir": proj})
+        self.assertEqual(os.path.dirname(r.json()["path"]), os.path.join(proj, "EasyScript"))
+        # A folder that doesn't exist (project moved / unsaved): back to the export folder.
+        r = self.client.post("/xml/cut", headers=H, json={
+            "xml_path": src, "cuts_ticks": [[100 * TPF25, 150 * TPF25]], "project_dir": os.path.join(proj, "gone")})
+        self.assertEqual(os.path.dirname(r.json()["path"]), self.tmp)
+
     def test_xml_cut_rejects_non_xml(self):
         r = self.client.post("/xml/cut", headers=H, json={"xml_path": self.wav, "cuts_ticks": []})
         self.assertEqual(r.status_code, 400)

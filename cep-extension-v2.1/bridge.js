@@ -56,6 +56,8 @@
     getPlayerPosition: function () { return es("esGetPlayerPosition()"); },
     listAudioTracks: function () { return esJson("esListAudioTracks()"); },
     exportSequenceXML: function () { return esJson("esExportSequenceXML()"); },
+    // Folder of the open project ("" when it was never saved).
+    projectDir: function () { return es("esProjectDir()").then(function (d) { return d || ""; }); },
     importSequenceXML: function (path, expectName) {
       return esJson("esImportSequenceXML('" + q(path) + "','" + q(expectName || "") + "')");
     },

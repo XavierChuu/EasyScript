@@ -151,6 +151,7 @@ class SeparateEndpointTest(unittest.TestCase):
         self.fail("job did not finish")
 
     def test_separate_cache_and_export(self):
+        calls = self.fake.calls
         body = {"audio_path": self.src, "start": 0.5, "end": 1.5}
         job = self.wait(self.client.post("/separate", headers=H, json=body).json()["job_id"])
         self.assertEqual(job["status"], "done", job)
@@ -161,7 +162,7 @@ class SeparateEndpointTest(unittest.TestCase):
 
         again = self.wait(self.client.post("/separate", headers=H, json=body).json()["job_id"])
         self.assertTrue(again["result"]["cached"])
-        self.assertEqual(self.fake.calls, 1)
+        self.assertEqual(self.fake.calls, calls + 1)
         other = self.wait(self.client.post("/separate", headers=H, json={"audio_path": self.src}).json()["job_id"])
         self.assertNotEqual(other["result"]["vocals"], res["vocals"])   # another range → another cache entry
 
@@ -172,6 +173,15 @@ class SeparateEndpointTest(unittest.TestCase):
         self.assertEqual(os.path.basename(p1), "Take_ 1 - Voice.wav")
         self.assertEqual(os.path.basename(p2), "Take_ 1 - Voice (2).wav")   # never overwrites
         self.assertEqual(os.path.dirname(p1), os.path.join(server.export_dir, "EasyScript Stems"))
+
+    def test_export_next_to_the_project(self):
+        body = {"audio_path": self.src, "start": 0.0, "end": 1.0}
+        res = self.wait(self.client.post("/separate", headers=H, json=body).json()["job_id"])["result"]
+        proj = os.path.join(self.tmp, "project")
+        os.makedirs(proj)
+        r = self.client.post("/separate/export", headers=H,
+                             json={"path": res["music"], "name": "Clip - Music", "project_dir": proj})
+        self.assertEqual(r.json()["path"], os.path.join(proj, "EasyScript", "Stems", "Clip - Music.wav"))
 
     def test_export_refuses_files_outside_the_stem_cache(self):
         r = self.client.post("/separate/export", headers=H, json={"path": self.src, "name": "x"})
