@@ -3,9 +3,12 @@ uvicorn==0.34.2
 python-multipart>=0.0.18
 faster-whisper==1.2.1
 pydub==0.25.1
-webrtcvad==2.0.10
+webrtcvad==2.0.10; sys_platform != "win32"
+# Same `webrtcvad` module, prebuilt wheels: plain webrtcvad needs MSVC to compile.
+webrtcvad-wheels==2.0.14.post1; sys_platform == "win32"
 setuptools<81  # webrtcvad imports pkg_resources (dropped in setuptools 81)
 websockets>=12.0
+httpx>=0.27  # translator.py: Ollama client (imported at server start)
 numpy==2.2.5
 mlx-whisper>=0.4.0; sys_platform == "darwin" and platform_machine == "arm64"
 pyinstaller==6.13.0
